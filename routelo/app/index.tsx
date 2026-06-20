@@ -1,10 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
@@ -15,59 +15,136 @@ import {
   SafeAreaView,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
 } from 'react-native';
 
-import {
-  DEFAULT_SETTINGS,
-  GYEONGGI_DISTRICTS,
-  SAMPLE_DELIVERIES,
-  SAMPLE_FUEL_LOGS,
-  SAMPLE_MILEAGE_LOGS,
-  SAMPLE_OCR_FORM,
-  SEOUL_DISTRICTS,
-} from './data';
-import { Delivery, FeeSettings, FuelLog, MileageLog, OcrForm } from './models';
-import { calculateFeeByAddress, geocodeAddress, optimizeByNearestNeighbor } from './services/maps';
+import { SAMPLE_DELIVERIES } from './data';
+import { Delivery, OcrFieldKey, OcrFieldResult, OcrPipelineResult } from './models';
+import { optimizeByNearestNeighbor } from './services/maps';
+import { inspectCaptureQuality, runHybridOcr } from './services/ocr';
 
-type TabKey = 'deliveries' | 'ocr' | 'route' | 'finance' | 'settings';
+type TabKey = 'home' | 'deliveries' | 'route' | 'notifications' | 'settings';
 type DeliveryFilter = 'all' | 'pending' | 'completed';
-type Period = '일간' | '주간' | '월간';
 
-const STORAGE_KEY = '@routelo/state/v1';
-const CURRENCY = new Intl.NumberFormat('ko-KR');
-const ThemeContext = createContext(false);
-const useDarkMode = () => useContext(ThemeContext);
+const STORAGE_KEY = '@routelo/md3-state/v1';
 
-const tabs: { key: TabKey; label: string; icon: string; activeIcon: string }[] = [
-  { key: 'deliveries', label: '배달', icon: 'list-outline', activeIcon: 'list' },
-  { key: 'ocr', label: '인수증', icon: 'receipt-outline', activeIcon: 'receipt' },
+const C = {
+  primary: '#2457C5',
+  primaryContainer: '#DCE6FF',
+  onPrimaryContainer: '#0B2D6B',
+  navy: '#17243C',
+  background: '#F5F7FB',
+  surface: '#FFFFFF',
+  surfaceAlt: '#EEF2F7',
+  outline: '#D9E0EA',
+  text: '#172033',
+  textMuted: '#657189',
+  success: '#247A55',
+  successBg: '#DDF3E8',
+  warning: '#C75B12',
+  warningBg: '#FFF0E4',
+  danger: '#C93434',
+  dangerBg: '#FDE7E7',
+};
+
+const tabs: Array<{
+  key: TabKey;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  activeIcon: keyof typeof Ionicons.glyphMap;
+}> = [
+  { key: 'home', label: '홈', icon: 'grid-outline', activeIcon: 'grid' },
+  { key: 'deliveries', label: '배달', icon: 'cube-outline', activeIcon: 'cube' },
   { key: 'route', label: '동선', icon: 'map-outline', activeIcon: 'map' },
-  { key: 'finance', label: '주유 계산기', icon: 'calculator-outline', activeIcon: 'calculator' },
+  {
+    key: 'notifications',
+    label: '알림',
+    icon: 'notifications-outline',
+    activeIcon: 'notifications',
+  },
   { key: 'settings', label: '설정', icon: 'settings-outline', activeIcon: 'settings' },
 ];
 
-const emptyOcrForm: OcrForm = {
-  orderVendor: '',
-  orderVendorTel: '',
-  deliveryVendor: '',
-  deliveryVendorTel: '',
-  productName: '',
-  productQuantity: '1',
-  eventTime: '',
-  deliveryDt: '',
-  deliveryAddress: '',
-  customerRequests: '',
-  recipientTel: '',
-};
-
-function money(value: number) {
-  return `${CURRENCY.format(Math.round(value))}원`;
+function timeOf(value: string) {
+  return value.split(' ')[1] || value;
 }
 
-function SectionTitle({
+function addMinutes(time: string, minutes: number) {
+  const [hour, minute] = time.split(':').map(Number);
+  const total = hour * 60 + minute + minutes;
+  return `${String(Math.floor(total / 60) % 24).padStart(2, '0')}:${String(
+    total % 60,
+  ).padStart(2, '0')}`;
+}
+
+function isEventDelivery(delivery: Delivery) {
+  return Boolean(delivery.eventTime) || delivery.productName.includes('축하');
+}
+
+function priorityOf(delivery: Delivery) {
+  if (isEventDelivery(delivery)) return 'urgent';
+  if (delivery.distanceKm >= 10) return 'risk';
+  return delivery.status === 'completed' ? 'completed' : 'normal';
+}
+
+function StatusBadge({ status }: { status: Delivery['status'] }) {
+  const completed = status === 'completed';
+  return (
+    <View style={[styles.badge, completed ? styles.successBadge : styles.waitBadge]}>
+      <View
+        style={[
+          styles.badgeDot,
+          { backgroundColor: completed ? C.success : C.primary },
+        ]}
+      />
+      <Text
+        style={[
+          styles.badgeText,
+          { color: completed ? C.success : C.primary },
+        ]}
+      >
+        {completed ? '완료' : '배달 대기'}
+      </Text>
+    </View>
+  );
+}
+
+function ScreenHeader({
+  eyebrow,
+  title,
+  subtitle,
+  notificationCount,
+  onNotificationPress,
+}: {
+  eyebrow: string;
+  title: string;
+  subtitle?: string;
+  notificationCount?: number;
+  onNotificationPress?: () => void;
+}) {
+  return (
+    <View style={styles.header}>
+      <View style={styles.headerCopy}>
+        <Text style={styles.eyebrow}>{eyebrow}</Text>
+        <Text style={styles.screenTitle}>{title}</Text>
+        {!!subtitle && <Text style={styles.screenSubtitle}>{subtitle}</Text>}
+      </View>
+      <Pressable style={styles.headerAction} onPress={onNotificationPress}>
+        <Ionicons name="notifications-outline" size={23} color={C.navy} />
+        {!!notificationCount && notificationCount > 0 && (
+          <View style={styles.notificationCounter}>
+            <Text style={styles.notificationCounterText}>{notificationCount}</Text>
+          </View>
+        )}
+      </Pressable>
+    </View>
+  );
+}
+
+function SectionHeader({
   title,
   caption,
   action,
@@ -76,183 +153,304 @@ function SectionTitle({
   caption?: string;
   action?: React.ReactNode;
 }) {
-  const dark = useDarkMode();
   return (
-    <View style={styles.sectionHeading}>
-      <View style={styles.sectionTitleWrap}>
-        <Text style={[styles.sectionTitle, dark && styles.darkText]}>{title}</Text>
-        {!!caption && <Text style={[styles.sectionCaption, dark && styles.darkMutedText]}>{caption}</Text>}
+    <View style={styles.sectionHeader}>
+      <View>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {!!caption && <Text style={styles.sectionCaption}>{caption}</Text>}
       </View>
       {action}
     </View>
   );
 }
 
-function StatCard({
+function MetricCard({
   icon,
   label,
   value,
-  accent = '#2E6BFF',
-  dark = false,
+  tone = 'primary',
 }: {
-  icon: string;
+  icon: keyof typeof Ionicons.glyphMap;
   label: string;
   value: string;
-  accent?: string;
-  dark?: boolean;
+  tone?: 'primary' | 'success' | 'neutral' | 'warning';
 }) {
-  const isDarkMode = useDarkMode();
+  const color =
+    tone === 'success'
+      ? C.success
+      : tone === 'warning'
+        ? C.warning
+        : tone === 'neutral'
+          ? C.textMuted
+          : C.primary;
+  const background =
+    tone === 'success'
+      ? C.successBg
+      : tone === 'warning'
+        ? C.warningBg
+        : tone === 'neutral'
+          ? C.surfaceAlt
+          : C.primaryContainer;
   return (
-    <View style={[styles.statCard, isDarkMode && styles.darkCard, dark && styles.statCardDark]}>
-      <View style={[styles.statIcon, { backgroundColor: `${accent}18` }]}>
-        <Ionicons name={icon as never} size={18} color={accent} />
+    <View style={styles.metricCard}>
+      <View style={[styles.metricIcon, { backgroundColor: background }]}>
+        <Ionicons name={icon} size={21} color={color} />
       </View>
-      <Text style={[styles.statLabel, isDarkMode && styles.darkMutedText, dark && styles.textMutedOnDark]}>{label}</Text>
-      <Text style={[styles.statValue, isDarkMode && styles.darkText, dark && styles.textOnDark]}>{value}</Text>
+      <Text style={styles.metricValue}>{value}</Text>
+      <Text style={styles.metricLabel}>{label}</Text>
     </View>
+  );
+}
+
+function TimeAlertCard({
+  type,
+  time,
+  title,
+  address,
+}: {
+  type: 'deadline' | 'event';
+  time: string;
+  title: string;
+  address: string;
+}) {
+  const event = type === 'event';
+  return (
+    <View style={[styles.timeAlert, event ? styles.eventAlert : styles.deadlineAlert]}>
+      <View style={[styles.timeIcon, { backgroundColor: event ? C.dangerBg : C.warningBg }]}>
+        <Ionicons
+          name={event ? 'calendar-outline' : 'alarm-outline'}
+          size={22}
+          color={event ? C.danger : C.warning}
+        />
+      </View>
+      <View style={styles.flex}>
+        <Text style={[styles.timeAlertLabel, { color: event ? C.danger : C.warning }]}>
+          {event ? '가장 가까운 예식 시간' : '가장 가까운 엄수 마감'}
+        </Text>
+        <View style={styles.timeAlertTitleRow}>
+          <Text style={styles.timeAlertTime}>{time}</Text>
+          <Text style={styles.timeAlertTitle} numberOfLines={1}>
+            {title}
+          </Text>
+        </View>
+        <Text style={styles.timeAlertAddress} numberOfLines={1}>
+          {address}
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={20} color={C.textMuted} />
+    </View>
+  );
+}
+
+function ProgressCard({
+  completed,
+  total,
+  distance,
+}: {
+  completed: number;
+  total: number;
+  distance: number;
+}) {
+  const progress = total ? completed / total : 0;
+  return (
+    <View style={styles.progressCard}>
+      <View style={styles.progressTop}>
+        <View>
+          <Text style={styles.progressLabel}>오늘의 업무 진행률</Text>
+          <Text style={styles.progressValue}>{Math.round(progress * 100)}%</Text>
+        </View>
+        <View style={styles.progressSummary}>
+          <Text style={styles.progressSummaryValue}>
+            {completed}/{total}
+          </Text>
+          <Text style={styles.progressSummaryLabel}>완료</Text>
+        </View>
+      </View>
+      <View style={styles.progressTrack}>
+        <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
+      </View>
+      <View style={styles.progressMeta}>
+        <View style={styles.metaItem}>
+          <Ionicons name="navigate-outline" size={16} color={C.textMuted} />
+          <Text style={styles.metaText}>남은 예상 거리 {distance.toFixed(1)}km</Text>
+        </View>
+        <View style={styles.metaItem}>
+          <Ionicons name="time-outline" size={16} color={C.textMuted} />
+          <Text style={styles.metaText}>약 {Math.round(distance * 4.2)}분</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function CompactDelivery({
+  delivery,
+  index,
+  onPress,
+}: {
+  delivery: Delivery;
+  index: number;
+  onPress: () => void;
+}) {
+  const priority = priorityOf(delivery);
+  return (
+    <Pressable style={styles.compactDelivery} onPress={onPress}>
+      <View style={styles.sequenceMarker}>
+        <Text style={styles.sequenceMarkerText}>{index + 1}</Text>
+      </View>
+      <View style={styles.flex}>
+        <View style={styles.rowBetween}>
+          <Text style={styles.compactTime}>{timeOf(delivery.deliveryDt)}</Text>
+          <StatusBadge status={delivery.status} />
+        </View>
+        <Text style={styles.compactTitle}>{delivery.productName}</Text>
+        <Text style={styles.compactAddress} numberOfLines={1}>
+          {delivery.deliveryAddress}
+        </Text>
+        {priority === 'urgent' && (
+          <View style={styles.inlineUrgent}>
+            <Ionicons name="alert-circle" size={15} color={C.danger} />
+            <Text style={styles.inlineUrgentText}>예식 {delivery.eventTime} · 시간 엄수</Text>
+          </View>
+        )}
+      </View>
+      <Ionicons name="chevron-forward" size={20} color={C.textMuted} />
+    </Pressable>
+  );
+}
+
+function HomeScreen({
+  deliveries,
+  onDeliveryPress,
+  onSeeAll,
+  onNotifications,
+}: {
+  deliveries: Delivery[];
+  onDeliveryPress: (delivery: Delivery) => void;
+  onSeeAll: () => void;
+  onNotifications: () => void;
+}) {
+  const pending = deliveries.filter((item) => item.status === 'pending');
+  const completed = deliveries.length - pending.length;
+  const optimized = optimizeByNearestNeighbor(pending);
+  const eventDelivery = pending.find(isEventDelivery);
+  const deadline = pending[0];
+  const remainingDistance = pending.reduce((sum, item) => sum + item.distanceKm, 0);
+
+  return (
+    <ScrollView contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
+      <ScreenHeader
+        eyebrow="ROUTELO · 오늘의 운영"
+        title="안녕하세요, 기사님"
+        subtitle="마감 시간과 우선 배송을 먼저 확인하세요."
+        notificationCount={3}
+        onNotificationPress={onNotifications}
+      />
+
+      <View style={styles.metricsGrid}>
+        <MetricCard icon="cube-outline" label="오늘 전체" value={`${deliveries.length}건`} />
+        <MetricCard icon="checkmark-circle-outline" label="완료" value={`${completed}건`} tone="success" />
+        <MetricCard icon="time-outline" label="남은 배달" value={`${pending.length}건`} tone="warning" />
+      </View>
+
+      <ProgressCard completed={completed} total={deliveries.length} distance={remainingDistance} />
+
+      <SectionHeader title="시간 엄수 알림" caption="가장 가까운 중요 일정" />
+      {!!deadline && (
+        <TimeAlertCard
+          type="deadline"
+          time={timeOf(deadline.deliveryDt)}
+          title={deadline.productName}
+          address={deadline.deliveryAddress}
+        />
+      )}
+      {!!eventDelivery && (
+        <TimeAlertCard
+          type="event"
+          time={eventDelivery.eventTime}
+          title={`${eventDelivery.productName} 예식`}
+          address={eventDelivery.deliveryAddress}
+        />
+      )}
+
+      <SectionHeader
+        title="다음 배달"
+        caption="최적화된 방문 순서"
+        action={
+          <Pressable style={styles.textButton} onPress={onSeeAll}>
+            <Text style={styles.textButtonLabel}>전체 보기</Text>
+            <Ionicons name="arrow-forward" size={16} color={C.primary} />
+          </Pressable>
+        }
+      />
+      <View style={styles.surfaceCard}>
+        {optimized.slice(0, 3).map((delivery, index) => (
+          <View key={delivery.id}>
+            <CompactDelivery
+              delivery={delivery}
+              index={index}
+              onPress={() => onDeliveryPress(delivery)}
+            />
+            {index < Math.min(optimized.length, 3) - 1 && <View style={styles.divider} />}
+          </View>
+        ))}
+      </View>
+    </ScrollView>
   );
 }
 
 function DeliveryCard({
   delivery,
-  index,
-  onToggle,
+  onPress,
 }: {
   delivery: Delivery;
-  index?: number;
-  onToggle: () => void;
+  onPress: () => void;
 }) {
-  const completed = delivery.status === 'completed';
-  const dark = useDarkMode();
-  const isCelebration = delivery.productName.includes('축하');
-
+  const urgent = isEventDelivery(delivery);
+  const estimatedArrival = addMinutes(timeOf(delivery.deliveryDt), -18);
   return (
-    <View style={[styles.deliveryCard, dark && styles.darkCard, completed && styles.deliveryCardCompleted]}>
-      <View style={styles.deliveryCardTop}>
-        <View style={styles.deliveryTimeWrap}>
-          {typeof index === 'number' && (
-            <View style={styles.routeNumber}>
-              <Text style={styles.routeNumberText}>{index + 1}</Text>
-            </View>
-          )}
-          <View>
-            <Text style={styles.deliveryTime}>
-              {delivery.deliveryDt.split(' ')[1] || delivery.deliveryDt}
-            </Text>
-            <Text style={[styles.deliveryVendor, dark && styles.darkMutedText]}>배달 예정</Text>
+    <View style={styles.deliveryCard}>
+      <View style={styles.rowBetween}>
+        <View style={styles.deliveryCardTitleGroup}>
+          <View style={[styles.destinationIcon, urgent && styles.destinationIconUrgent]}>
+            <Ionicons name={urgent ? 'calendar' : 'location'} size={20} color={urgent ? C.danger : C.primary} />
+          </View>
+          <View style={styles.flex}>
+            <Text style={styles.destinationName}>{delivery.productName}</Text>
+            <Text style={styles.destinationVendor}>{delivery.orderVendor}</Text>
           </View>
         </View>
-        <View style={[styles.statusChip, completed && styles.statusChipCompleted]}>
-          <Text style={[styles.statusChipText, completed && styles.statusChipTextCompleted]}>
-            {completed ? '완료' : '배달 대기'}
+        <StatusBadge status={delivery.status} />
+      </View>
+      <Text style={styles.deliveryAddress}>{delivery.deliveryAddress}</Text>
+
+      <View style={styles.deliveryTimeGrid}>
+        <View style={styles.deliveryTimeCell}>
+          <Text style={styles.deliveryTimeCellLabel}>도착 예정</Text>
+          <Text style={styles.deliveryTimeCellValue}>{estimatedArrival}</Text>
+        </View>
+        <View style={styles.deliveryTimeCell}>
+          <Text style={styles.deliveryTimeCellLabel}>엄수 마감</Text>
+          <Text style={[styles.deliveryTimeCellValue, styles.warningText]}>
+            {timeOf(delivery.deliveryDt)}
+          </Text>
+        </View>
+        <View style={styles.deliveryTimeCell}>
+          <Text style={styles.deliveryTimeCellLabel}>예식 시간</Text>
+          <Text style={[styles.deliveryTimeCellValue, urgent && styles.dangerText]}>
+            {delivery.eventTime || '해당 없음'}
           </Text>
         </View>
       </View>
 
-      <View style={styles.productRow}>
-        <Text style={[styles.productName, dark && styles.darkText]}>{delivery.productName}</Text>
-        <View style={styles.quantityBadge}>
-          <Text style={styles.quantityLabel}>수량</Text>
-          <Text style={styles.quantityValue}>{delivery.productQuantity || 1}개</Text>
+      <View style={styles.deliveryCardFooter}>
+        <View style={styles.metaItem}>
+          <Ionicons name="navigate-outline" size={16} color={C.textMuted} />
+          <Text style={styles.metaText}>{delivery.distanceKm.toFixed(1)}km</Text>
         </View>
-      </View>
-      {isCelebration && !!delivery.eventTime && (
-        <View style={styles.eventTimeRow}>
-          <Ionicons name="alarm-outline" size={17} color="#E03131" />
-          <Text style={styles.eventTimeLabel}>예식 시간</Text>
-          <Text style={styles.eventTimeValue}>{delivery.eventTime}</Text>
-          <Text style={styles.eventTimeWarning}>시간 엄수</Text>
-        </View>
-      )}
-      <View style={[styles.vendorPanel, dark && styles.darkInset]}>
-        <View style={styles.vendorLine}>
-          <Text style={styles.vendorType}>발주화원</Text>
-          <View style={styles.flexOne}>
-            <Text style={[styles.vendorName, dark && styles.darkText]}>{delivery.orderVendor}</Text>
-            <Text style={[styles.vendorTel, dark && styles.darkMutedText]}>{delivery.orderVendorTel}</Text>
-          </View>
-          <Ionicons name="call-outline" size={17} color="#2E6BFF" />
-        </View>
-        <View style={styles.vendorDivider} />
-        <View style={styles.vendorLine}>
-          <Text style={styles.vendorType}>배송화원</Text>
-          <View style={styles.flexOne}>
-            <Text style={[styles.vendorName, dark && styles.darkText]}>{delivery.deliveryVendor}</Text>
-            <Text style={[styles.vendorTel, dark && styles.darkMutedText]}>{delivery.deliveryVendorTel}</Text>
-          </View>
-          <Ionicons name="call-outline" size={17} color="#2E6BFF" />
-        </View>
-      </View>
-      <View style={styles.infoLine}>
-        <Ionicons name="location-outline" size={17} color="#65748B" />
-        <Text style={[styles.infoText, dark && styles.darkMutedText]} numberOfLines={2}>
-          {delivery.deliveryAddress}
-        </Text>
-      </View>
-      <View style={styles.infoLine}>
-        <Ionicons name="chatbubble-ellipses-outline" size={16} color="#65748B" />
-        <Text style={[styles.infoText, dark && styles.darkMutedText]} numberOfLines={1}>
-          {delivery.customerRequests || '요청사항 없음'}
-        </Text>
-      </View>
-
-      <View style={styles.deliveryFooter}>
-        <View style={styles.feeWrap}>
-          <Text style={styles.distanceText}>{delivery.distanceKm.toFixed(1)}km</Text>
-          <Text style={styles.feeText}>{money(delivery.fee)}</Text>
-        </View>
-        <View style={styles.cardActions}>
-          <Pressable style={styles.iconButton}>
-            <Ionicons name="call-outline" size={19} color="#2E6BFF" />
-          </Pressable>
-          <Pressable
-            style={[styles.completeButton, completed && styles.undoButton]}
-            onPress={onToggle}
-          >
-            <Ionicons
-              name={completed ? 'refresh' : 'checkmark'}
-              size={18}
-              color={completed ? '#2E6BFF' : '#FFFFFF'}
-            />
-            <Text style={[styles.completeButtonText, completed && styles.undoButtonText]}>
-              {completed ? '되돌리기' : '완료 처리'}
-            </Text>
-          </Pressable>
-        </View>
-      </View>
-    </View>
-  );
-}
-
-function AppHeader({ activeTab }: { activeTab: TabKey }) {
-  const dark = useDarkMode();
-  const titles: Record<TabKey, string> = {
-    deliveries: '오늘의 배달',
-    ocr: '인수증 등록',
-    route: '배달 동선',
-    finance: '주유 계산기',
-    settings: '환경 설정',
-  };
-
-  const formattedDate = new Date().toLocaleDateString('ko-KR', {
-    month: 'long',
-    day: 'numeric',
-    weekday: 'short',
-  });
-
-  return (
-    <View style={[styles.header, dark && styles.darkSurface]}>
-      <View>
-        <Text style={[styles.dateText, dark && styles.darkMutedText]}>{formattedDate}</Text>
-        <Text style={[styles.pageTitle, dark && styles.darkText]}>{titles[activeTab]}</Text>
-      </View>
-      <View style={styles.headerRight}>
-        <View style={styles.syncBadge}>
-          <View style={styles.syncDot} />
-          <Text style={styles.syncText}>저장됨</Text>
-        </View>
-        <Pressable style={styles.profileButton}>
-          <Ionicons name="person" size={20} color="#2E6BFF" />
+        <Pressable style={styles.outlinedButton} onPress={onPress}>
+          <Text style={styles.outlinedButtonText}>상세 보기</Text>
+          <Ionicons name="chevron-forward" size={16} color={C.primary} />
         </Pressable>
       </View>
     </View>
@@ -261,483 +459,141 @@ function AppHeader({ activeTab }: { activeTab: TabKey }) {
 
 function DeliveryListScreen({
   deliveries,
-  onToggle,
-  onGoOcr,
+  onDeliveryPress,
+  onNotifications,
 }: {
   deliveries: Delivery[];
-  onToggle: (id: string) => void;
-  onGoOcr: () => void;
+  onDeliveryPress: (delivery: Delivery) => void;
+  onNotifications: () => void;
 }) {
-  const dark = useDarkMode();
   const [filter, setFilter] = useState<DeliveryFilter>('all');
   const filtered = deliveries.filter((delivery) =>
     filter === 'all' ? true : delivery.status === filter,
   );
-  const completed = deliveries.filter((delivery) => delivery.status === 'completed');
-  const totalFee = completed.reduce((sum, delivery) => sum + delivery.fee, 0);
-
   return (
-    <ScrollView
-      contentContainerStyle={styles.screenContent}
-      showsVerticalScrollIndicator={false}
-    >
-      <LinearGradient
-        colors={['#1D4ED8', '#3978FF']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.heroCard}
-      >
-        <View>
-          <Text style={styles.heroEyebrow}>TODAY&apos;S ROUTE</Text>
-          <Text style={styles.heroTitle}>
-            오늘도 안전하게,{'\n'}좋은 하루 보내세요!
-          </Text>
-        </View>
-        <View style={styles.heroCircle}>
-          <Ionicons name="navigate" size={30} color="#FFFFFF" />
-        </View>
-        <View style={styles.heroMetrics}>
-          <View style={styles.heroMetric}>
-            <Text style={styles.heroMetricValue}>{deliveries.length}</Text>
-            <Text style={styles.heroMetricLabel}>전체 배달</Text>
-          </View>
-          <View style={styles.heroDivider} />
-          <View style={styles.heroMetric}>
-            <Text style={styles.heroMetricValue}>{completed.length}</Text>
-            <Text style={styles.heroMetricLabel}>완료</Text>
-          </View>
-          <View style={styles.heroDivider} />
-          <View style={styles.heroMetric}>
-            <Text style={styles.heroMetricValue}>{money(totalFee)}</Text>
-            <Text style={styles.heroMetricLabel}>현재 수익</Text>
-          </View>
-        </View>
-      </LinearGradient>
-
-      <View style={styles.quickStats}>
-        <StatCard
-          icon="time-outline"
-          label="남은 배달"
-          value={`${deliveries.length - completed.length}건`}
-          accent="#FF8A34"
-        />
-        <StatCard
-          icon="speedometer-outline"
-          label="예상 거리"
-          value={`${deliveries
-            .filter((item) => item.status === 'pending')
-            .reduce((sum, item) => sum + item.distanceKm, 0)
-            .toFixed(1)}km`}
-          accent="#10A37F"
-        />
-      </View>
-
-      <SectionTitle
-        title="배달 목록"
-        caption={`${filtered.length}건의 일정`}
-        action={
-          <Pressable style={styles.addMiniButton} onPress={onGoOcr}>
-            <Ionicons name="add" size={17} color="#2E6BFF" />
-            <Text style={styles.addMiniText}>인수증 추가</Text>
-          </Pressable>
-        }
+    <ScrollView contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
+      <ScreenHeader
+        eyebrow="TODAY · DELIVERY"
+        title="오늘의 배달"
+        subtitle={`${deliveries.length}건의 배달 일정을 관리합니다.`}
+        notificationCount={3}
+        onNotificationPress={onNotifications}
       />
-
-      <View style={[styles.segment, dark && styles.darkInset]}>
+      <View style={styles.filterSegment}>
         {([
           ['all', '전체'],
           ['pending', '대기'],
           ['completed', '완료'],
-        ] as [DeliveryFilter, string][]).map(([key, label]) => (
+        ] as Array<[DeliveryFilter, string]>).map(([key, label]) => (
           <Pressable
             key={key}
-            style={[styles.segmentButton, filter === key && styles.segmentButtonActive]}
+            style={[styles.filterItem, filter === key && styles.filterItemSelected]}
             onPress={() => setFilter(key)}
           >
-            <Text
-              style={[
-                styles.segmentButtonText,
-                filter === key && styles.segmentButtonTextActive,
-              ]}
-            >
+            <Text style={[styles.filterText, filter === key && styles.filterTextSelected]}>
               {label}
             </Text>
           </Pressable>
         ))}
       </View>
-
-      {filtered.map((delivery) => (
-        <DeliveryCard
-          key={delivery.id}
-          delivery={delivery}
-          onToggle={() => onToggle(delivery.id)}
-        />
-      ))}
-
-      {!filtered.length && (
-        <View style={styles.emptyState}>
-          <Ionicons name="file-tray-outline" size={38} color="#AAB4C4" />
-          <Text style={styles.emptyTitle}>표시할 배달이 없습니다</Text>
-          <Text style={styles.emptyCaption}>인수증을 촬영해 새 배달을 등록해보세요.</Text>
-        </View>
-      )}
+      <View style={styles.deliveryList}>
+        {filtered.map((delivery) => (
+          <DeliveryCard
+            key={delivery.id}
+            delivery={delivery}
+            onPress={() => onDeliveryPress(delivery)}
+          />
+        ))}
+      </View>
     </ScrollView>
   );
 }
 
-function LabeledInput({
-  label,
-  value,
-  onChangeText,
-  placeholder,
-  multiline,
-  keyboardType,
-}: {
-  label: string;
-  value: string;
-  onChangeText: (value: string) => void;
-  placeholder?: string;
-  multiline?: boolean;
-  keyboardType?: 'default' | 'numeric' | 'phone-pad';
-}) {
-  const dark = useDarkMode();
+function RouteMap({ route }: { route: Delivery[] }) {
+  const points = [
+    { left: 49, top: 227 },
+    { left: 96, top: 151 },
+    { left: 198, top: 120 },
+    { left: 269, top: 57 },
+  ];
+  const lines = [
+    { left: 60, top: 198, width: 68, rotate: '-55deg' },
+    { left: 110, top: 142, width: 106, rotate: '-15deg' },
+    { left: 213, top: 95, width: 89, rotate: '-42deg' },
+  ];
   return (
-    <View style={styles.inputGroup}>
-      <Text style={[styles.inputLabel, dark && styles.darkMutedText]}>{label}</Text>
-      <TextInput
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor="#AAB4C4"
-        multiline={multiline}
-        keyboardType={keyboardType}
-        style={[styles.textInput, dark && styles.darkInput, multiline && styles.multilineInput]}
-      />
+    <View style={styles.mapCard}>
+      <View style={[styles.mapRoad, styles.mapRoadOne]} />
+      <View style={[styles.mapRoad, styles.mapRoadTwo]} />
+      <View style={[styles.mapRoad, styles.mapRoadThree]} />
+      <View style={styles.mapPark} />
+      {lines.slice(0, route.length).map((line, index) => (
+        <View key={index}>
+          <View
+            style={[
+              styles.routeLineVisual,
+              {
+                left: line.left,
+                top: line.top,
+                width: line.width,
+                transform: [{ rotate: line.rotate }],
+              },
+            ]}
+          />
+          <View
+            style={[
+              styles.routeArrow,
+              {
+                top: index === 0 ? 176 : index === 1 ? 126 : 79,
+                left: index === 0 ? 85 : index === 1 ? 163 : 244,
+              },
+            ]}
+          >
+            <Ionicons name="arrow-forward" size={13} color="#FFFFFF" />
+          </View>
+        </View>
+      ))}
+      <View style={[styles.currentLocation, points[0]]}>
+        <View style={styles.currentLocationInner} />
+      </View>
+      {route.slice(0, 3).map((delivery, index) => (
+        <View key={delivery.id} style={[styles.mapPin, points[index + 1]]}>
+          <Text style={styles.mapPinText}>{index + 1}</Text>
+        </View>
+      ))}
+      <View style={styles.mapLegend}>
+        <View style={styles.googleDot} />
+        <Text style={styles.mapLegendText}>최적화된 배송 경로</Text>
+      </View>
     </View>
-  );
-}
-
-function OcrScreen({
-  onRegister,
-}: {
-  onRegister: (form: OcrForm, imageUri?: string) => Promise<void>;
-}) {
-  const dark = useDarkMode();
-  const [imageUri, setImageUri] = useState<string>();
-  const [processing, setProcessing] = useState(false);
-  const [form, setForm] = useState<OcrForm>(emptyOcrForm);
-  const [step, setStep] = useState<'capture' | 'review'>('capture');
-
-  const update = (key: keyof OcrForm, value: string) => {
-    setForm((current) => ({ ...current, [key]: value }));
-  };
-
-  const chooseImage = async (camera: boolean) => {
-    const permission = camera
-      ? await ImagePicker.requestCameraPermissionsAsync()
-      : await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-    if (!permission.granted) {
-      Alert.alert('권한 필요', '인수증 이미지를 불러오려면 사진 접근 권한이 필요합니다.');
-      return;
-    }
-
-    const result = camera
-      ? await ImagePicker.launchCameraAsync({
-          mediaTypes: ['images'],
-          quality: 0.8,
-          allowsEditing: true,
-        })
-      : await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ['images'],
-          quality: 0.8,
-          allowsEditing: true,
-        });
-
-    if (result.canceled) return;
-
-    setImageUri(result.assets[0].uri);
-    setProcessing(true);
-    setTimeout(() => {
-      setForm(SAMPLE_OCR_FORM);
-      setProcessing(false);
-      setStep('review');
-    }, 1100);
-  };
-
-  const register = async () => {
-    if (!form.deliveryAddress || !form.productName || !form.deliveryDt) {
-      Alert.alert('필수 정보 확인', '상품명, 배달일시, 배달장소를 확인해주세요.');
-      return;
-    }
-
-    await onRegister(form, imageUri);
-    setForm(emptyOcrForm);
-    setImageUri(undefined);
-    setStep('capture');
-    Alert.alert('등록 완료', '배달 대기 목록에 새 일정이 추가되었습니다.');
-  };
-
-  if (step === 'capture') {
-    return (
-      <ScrollView
-        contentContainerStyle={styles.screenContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={[styles.ocrIntro, dark && styles.darkBlueInset]}>
-          <View style={styles.ocrIntroIcon}>
-            <Ionicons name="sparkles" size={22} color="#2E6BFF" />
-          </View>
-          <View style={styles.flexOne}>
-            <Text style={styles.ocrIntroTitle}>AI 인수증 자동 등록</Text>
-            <Text style={styles.ocrIntroText}>
-              인수증을 촬영하면 배달 정보를 읽어 자동으로 입력합니다.
-            </Text>
-          </View>
-        </View>
-
-        <Pressable style={[styles.scanner, dark && styles.darkCard]} onPress={() => chooseImage(true)}>
-          {imageUri ? (
-            <Image source={{ uri: imageUri }} style={styles.receiptImage} />
-          ) : (
-            <>
-              <View style={[styles.scanCorner, styles.scanCornerTL]} />
-              <View style={[styles.scanCorner, styles.scanCornerTR]} />
-              <View style={[styles.scanCorner, styles.scanCornerBL]} />
-              <View style={[styles.scanCorner, styles.scanCornerBR]} />
-              <View style={styles.cameraCircle}>
-                <Ionicons name="camera-outline" size={35} color="#2E6BFF" />
-              </View>
-              <Text style={styles.scannerTitle}>인수증을 프레임 안에 맞춰주세요</Text>
-              <Text style={styles.scannerCaption}>흔들리지 않게 밝은 곳에서 촬영하세요</Text>
-            </>
-          )}
-
-          {processing && (
-            <View style={styles.processingOverlay}>
-              <Ionicons name="scan" size={40} color="#FFFFFF" />
-              <Text style={styles.processingText}>배달 정보를 읽고 있어요...</Text>
-            </View>
-          )}
-        </Pressable>
-
-        <Pressable style={styles.primaryButton} onPress={() => chooseImage(true)}>
-          <Ionicons name="camera" size={20} color="#FFFFFF" />
-          <Text style={styles.primaryButtonText}>인수증 촬영하기</Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={() => chooseImage(false)}>
-          <Ionicons name="images-outline" size={20} color="#2E6BFF" />
-          <Text style={styles.secondaryButtonText}>갤러리에서 불러오기</Text>
-        </Pressable>
-
-        <View style={styles.tipCard}>
-          <Ionicons name="bulb-outline" size={20} color="#E47A22" />
-          <View style={styles.flexOne}>
-            <Text style={styles.tipTitle}>인식률을 높이는 방법</Text>
-            <Text style={styles.tipText}>
-              인수증 전체가 보이도록 수직으로 촬영하고, 그림자가 생기지 않게 해주세요.
-            </Text>
-          </View>
-        </View>
-      </ScrollView>
-    );
-  }
-
-  return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.flexOne}
-    >
-      <ScrollView
-        contentContainerStyle={styles.screenContent}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.reviewStatus}>
-          <View style={styles.reviewCheck}>
-            <Ionicons name="checkmark" size={19} color="#FFFFFF" />
-          </View>
-          <View style={styles.flexOne}>
-            <Text style={styles.reviewTitle}>정보 추출이 완료됐어요</Text>
-            <Text style={styles.reviewCaption}>등록 전 잘못 인식된 내용이 없는지 확인해주세요.</Text>
-          </View>
-          <Pressable onPress={() => setStep('capture')}>
-            <Text style={styles.retakeText}>다시 촬영</Text>
-          </Pressable>
-        </View>
-
-        <SectionTitle title="추출된 배달 정보" caption="필수 항목을 확인해주세요" />
-        <View style={[styles.formCard, dark && styles.darkCard]}>
-          <View style={styles.twoColumns}>
-            <View style={styles.halfInput}>
-              <LabeledInput
-                label="발주 화원"
-                value={form.orderVendor}
-                onChangeText={(value) => update('orderVendor', value)}
-              />
-            </View>
-            <View style={styles.halfInput}>
-              <LabeledInput
-                label="발주 화원 전화"
-                value={form.orderVendorTel}
-                keyboardType="phone-pad"
-                onChangeText={(value) => update('orderVendorTel', value)}
-              />
-            </View>
-          </View>
-          <View style={styles.twoColumns}>
-            <View style={styles.halfInput}>
-              <LabeledInput
-                label="배송 화원"
-                value={form.deliveryVendor}
-                onChangeText={(value) => update('deliveryVendor', value)}
-              />
-            </View>
-            <View style={styles.halfInput}>
-              <LabeledInput
-                label="배송 화원 전화"
-                value={form.deliveryVendorTel}
-                keyboardType="phone-pad"
-                onChangeText={(value) => update('deliveryVendorTel', value)}
-              />
-            </View>
-          </View>
-          <View style={styles.twoColumns}>
-            <View style={styles.flexOne}>
-              <LabeledInput
-                label="상품명 *"
-                value={form.productName}
-                onChangeText={(value) => update('productName', value)}
-              />
-            </View>
-            <View style={styles.quantityInputColumn}>
-              <LabeledInput
-                label="화환 수량 *"
-                value={form.productQuantity}
-                keyboardType="numeric"
-                onChangeText={(value) => update('productQuantity', value)}
-              />
-            </View>
-          </View>
-          <LabeledInput
-            label="예식 시간 (축하화환)"
-            value={form.eventTime}
-            placeholder="예: 17:00"
-            onChangeText={(value) => update('eventTime', value)}
-          />
-          <LabeledInput
-            label="배달 일시 *"
-            value={form.deliveryDt}
-            onChangeText={(value) => update('deliveryDt', value)}
-          />
-          <LabeledInput
-            label="배달 장소 *"
-            value={form.deliveryAddress}
-            onChangeText={(value) => update('deliveryAddress', value)}
-          />
-          <LabeledInput
-            label="인수자 전화번호"
-            value={form.recipientTel}
-            keyboardType="phone-pad"
-            onChangeText={(value) => update('recipientTel', value)}
-          />
-          <LabeledInput
-            label="주문자 요구사항"
-            value={form.customerRequests}
-            multiline
-            onChangeText={(value) => update('customerRequests', value)}
-          />
-        </View>
-
-        <Pressable style={styles.primaryButton} onPress={register}>
-          <Ionicons name="checkmark-circle" size={20} color="#FFFFFF" />
-          <Text style={styles.primaryButtonText}>배달 목록에 등록</Text>
-        </Pressable>
-      </ScrollView>
-    </KeyboardAvoidingView>
   );
 }
 
 function RouteScreen({
   deliveries,
-  onToggle,
+  onDeliveryPress,
+  onNotifications,
 }: {
   deliveries: Delivery[];
-  onToggle: (id: string) => void;
+  onDeliveryPress: (delivery: Delivery) => void;
+  onNotifications: () => void;
 }) {
-  const dark = useDarkMode();
-  const pending = deliveries.filter((delivery) => delivery.status === 'pending');
-  const [route, setRoute] = useState(() => optimizeByNearestNeighbor(pending));
-  const [optimized, setOptimized] = useState(true);
-  const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
-
-  useEffect(() => {
-    setRoute(optimizeByNearestNeighbor(pending));
-  }, [deliveries]);
-
+  const route = optimizeByNearestNeighbor(
+    deliveries.filter((item) => item.status === 'pending'),
+  );
+  const next = route[0];
   const totalDistance = route.reduce((sum, item) => sum + item.distanceKm, 0);
-  const bounds = {
-    minLat: Math.min(...route.map((item) => item.latitude), 37.48),
-    maxLat: Math.max(...route.map((item) => item.latitude), 37.53),
-    minLon: Math.min(...route.map((item) => item.longitude), 127.0),
-    maxLon: Math.max(...route.map((item) => item.longitude), 127.11),
-  };
-  const startCoordinate = { latitude: 37.5033, longitude: 127.0442 };
-  const deliveryMapPoints = route.map((delivery) => ({
-    x:
-      mapSize.width *
-      (0.08 +
-        ((delivery.longitude - bounds.minLon) /
-          Math.max(bounds.maxLon - bounds.minLon, 0.001)) *
-          0.77),
-    y:
-      mapSize.height *
-      (0.12 +
-        (1 -
-          (delivery.latitude - bounds.minLat) /
-            Math.max(bounds.maxLat - bounds.minLat, 0.001)) *
-          0.65),
-  }));
-  const routeMapPoints = [
-    { x: mapSize.width * 0.44 + 11, y: mapSize.height * 0.84 + 11 },
-    ...deliveryMapPoints,
-  ];
-  const routeSegments = routeMapPoints.slice(0, -1).map((point, index) => {
-    const next = routeMapPoints[index + 1];
-    const dx = next.x - point.x;
-    const dy = next.y - point.y;
-    const length = Math.sqrt(dx * dx + dy * dy);
-    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
-    return {
-      key: `${index}-${index + 1}`,
-      left: (point.x + next.x - length) / 2,
-      top: (point.y + next.y) / 2,
-      length,
-      angle,
-      arrowX: point.x + dx * 0.68,
-      arrowY: point.y + dy * 0.68,
-    };
-  });
-
-  const optimize = () => {
-    setRoute(optimizeByNearestNeighbor(pending));
-    setOptimized(true);
-    Alert.alert('동선 최적화 완료', '현재 위치에서 가까운 순서로 경유지를 재정렬했습니다.');
-  };
 
   const openGoogleMaps = async () => {
-    if (!route.length) {
-      Alert.alert('배달지 없음', 'Google 지도에서 안내할 대기 중인 배달지가 없습니다.');
-      return;
-    }
+    if (!route.length) return;
     const destination = route[route.length - 1].deliveryAddress;
     const waypoints = route
       .slice(0, -1)
-      .map((delivery) => delivery.deliveryAddress)
+      .map((item) => item.deliveryAddress)
       .join('|');
     const url =
       'https://www.google.com/maps/dir/?api=1' +
-      `&origin=${startCoordinate.latitude},${startCoordinate.longitude}` +
+      '&origin=37.5033,127.0442' +
       `&destination=${encodeURIComponent(destination)}` +
       (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') +
       '&travelmode=driving';
@@ -745,1767 +601,1527 @@ function RouteScreen({
   };
 
   return (
-    <ScrollView
-      contentContainerStyle={styles.screenContent}
-      showsVerticalScrollIndicator={false}
-    >
-      <View style={styles.mapCard}>
-        <View
-          style={styles.mapBackground}
-          onLayout={(event) =>
-            setMapSize({
-              width: event.nativeEvent.layout.width,
-              height: event.nativeEvent.layout.height,
-            })
-          }
-        >
-          <View style={[styles.road, styles.roadOne]} />
-          <View style={[styles.road, styles.roadTwo]} />
-          <View style={[styles.road, styles.roadThree]} />
-          <View style={[styles.road, styles.roadFour]} />
-          <View style={styles.parkShape} />
-          <View style={styles.riverShape} />
-          <View style={styles.currentMarker}>
-            <View style={styles.currentMarkerInner} />
-          </View>
-
-          {routeSegments.map((segment, index) => (
-            <View key={segment.key}>
-              <View
-                style={[
-                  styles.mapRouteLine,
-                  {
-                    left: segment.left,
-                    top: segment.top,
-                    width: segment.length,
-                    transform: [{ rotate: `${segment.angle}deg` }],
-                  },
-                ]}
-              />
-              <View
-                style={[
-                  styles.mapRouteArrow,
-                  {
-                    left: segment.arrowX - 11,
-                    top: segment.arrowY - 11,
-                    transform: [{ rotate: `${segment.angle}deg` }],
-                  },
-                ]}
-              >
-                <Ionicons name="arrow-forward" size={15} color="#FFFFFF" />
-              </View>
-              <View
-                style={[
-                  styles.mapSegmentBadge,
-                  {
-                    left: (routeMapPoints[index].x + routeMapPoints[index + 1].x) / 2 - 9,
-                    top: (routeMapPoints[index].y + routeMapPoints[index + 1].y) / 2 - 20,
-                  },
-                ]}
-              >
-                <Text style={styles.mapSegmentBadgeText}>{index + 1}</Text>
-              </View>
+    <ScrollView contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
+      <ScreenHeader
+        eyebrow="ROUTE · OPTIMIZED"
+        title="배달 동선"
+        subtitle="마감과 이동 거리를 고려한 추천 경로입니다."
+        notificationCount={3}
+        onNotificationPress={onNotifications}
+      />
+      <RouteMap route={route} />
+      {!!next && (
+        <View style={styles.nextDestinationCard}>
+          <View style={styles.nextDestinationHeader}>
+            <View style={styles.nextBadge}>
+              <Ionicons name="navigate" size={15} color={C.primary} />
+              <Text style={styles.nextBadgeText}>다음 목적지</Text>
             </View>
-          ))}
-
-          {route.map((delivery, index) => {
-            const point = deliveryMapPoints[index];
-            return (
-              <View
-                key={delivery.id}
-                style={[
-                  styles.mapMarkerWrap,
-                  { left: (point?.x ?? 0) - 16, top: (point?.y ?? 0) - 16 },
-                ]}
-              >
-                <View style={styles.mapMarker}>
-                  <Text style={styles.mapMarkerText}>{index + 1}</Text>
-                </View>
-                <View style={styles.mapMarkerTail} />
-              </View>
-            );
-          })}
-
-          <View style={styles.mapBrand}>
-            <Ionicons name="logo-google" size={12} color="#4285F4" />
-            <Text style={styles.mapBrandText}>GOOGLE MAPS ROUTE</Text>
+            <Text style={styles.nextEta}>도착 예정 {addMinutes(timeOf(next.deliveryDt), -18)}</Text>
           </View>
-        </View>
-        <Pressable style={styles.myLocationButton}>
-          <Ionicons name="locate" size={20} color="#2E6BFF" />
-        </Pressable>
-      </View>
-
-      <View style={[styles.routeSummary, dark && styles.darkCard]}>
-        <View>
-          <View style={styles.optimizedRow}>
-            <View style={styles.optimizedBadge}>
-              <Ionicons name="sparkles" size={13} color="#087F5B" />
-              <Text style={styles.optimizedText}>{optimized ? '최적 동선' : '기본 순서'}</Text>
+          <Text style={styles.nextTitle}>{next.productName}</Text>
+          <Text style={styles.nextAddress}>{next.deliveryAddress}</Text>
+          <View style={styles.nextInfoRow}>
+            <View style={styles.nextInfo}>
+              <Text style={styles.nextInfoLabel}>남은 거리</Text>
+              <Text style={styles.nextInfoValue}>{next.distanceKm.toFixed(1)}km</Text>
+            </View>
+            <View style={styles.nextInfoDivider} />
+            <View style={styles.nextInfo}>
+              <Text style={styles.nextInfoLabel}>엄수 마감</Text>
+              <Text style={[styles.nextInfoValue, styles.warningText]}>
+                {timeOf(next.deliveryDt)}
+              </Text>
+            </View>
+            <View style={styles.nextInfoDivider} />
+            <View style={styles.nextInfo}>
+              <Text style={styles.nextInfoLabel}>예식 시간</Text>
+              <Text style={[styles.nextInfoValue, isEventDelivery(next) && styles.dangerText]}>
+                {next.eventTime || '-'}
+              </Text>
             </View>
           </View>
-          <Text style={styles.routeSummaryTitle}>{route.length}곳을 방문할 예정이에요</Text>
-          <Text style={styles.routeSummaryCaption}>
-            예상 {totalDistance.toFixed(1)}km · 약 {Math.round(totalDistance * 4.2)}분
-          </Text>
+          {isEventDelivery(next) && (
+            <View style={styles.priorityNotice}>
+              <Ionicons name="alert-circle" size={18} color={C.danger} />
+              <Text style={styles.priorityNoticeText}>
+                최우선 배송 · 예식 시작 전 설치 완료가 필요합니다.
+              </Text>
+            </View>
+          )}
+          <View style={styles.routeButtons}>
+            <Pressable style={styles.secondaryButton} onPress={() => onDeliveryPress(next)}>
+              <Text style={styles.secondaryButtonText}>배송 상세</Text>
+            </Pressable>
+            <Pressable style={styles.primaryButton} onPress={openGoogleMaps}>
+              <Ionicons name="navigate-outline" size={18} color="#FFFFFF" />
+              <Text style={styles.primaryButtonText}>Google 지도 열기</Text>
+            </Pressable>
+          </View>
         </View>
-        <Pressable style={styles.optimizeButton} onPress={optimize}>
-          <Ionicons name="git-compare-outline" size={18} color="#FFFFFF" />
-          <Text style={styles.optimizeButtonText}>다시 최적화</Text>
-        </Pressable>
-      </View>
-
-      <Pressable style={styles.googleMapsButton} onPress={openGoogleMaps}>
-        <Ionicons name="navigate-circle-outline" size={21} color="#FFFFFF" />
-        <View style={styles.flexOne}>
-          <Text style={styles.googleMapsButtonTitle}>Google 지도에서 동선 열기</Text>
-          <Text style={styles.googleMapsButtonCaption}>
-            현재 위치부터 {route.length}개 배달지를 방문 순서대로 안내
-          </Text>
-        </View>
-        <Ionicons name="open-outline" size={18} color="#FFFFFF" />
-      </Pressable>
-
-      <SectionTitle title="추천 방문 순서" caption="현재 위치 기준" />
-      <View style={styles.routeLine}>
+      )}
+      <SectionHeader
+        title="경로 요약"
+        caption={`${route.length}개 목적지 · 총 ${totalDistance.toFixed(1)}km`}
+      />
+      <View style={styles.surfaceCard}>
         {route.map((delivery, index) => (
-          <View key={delivery.id} style={styles.routeItemWrap}>
-            {index < route.length - 1 && <View style={styles.routeConnector} />}
-            <DeliveryCard
+          <View key={delivery.id}>
+            <CompactDelivery
               delivery={delivery}
               index={index}
-              onToggle={() => onToggle(delivery.id)}
+              onPress={() => onDeliveryPress(delivery)}
             />
+            {index < route.length - 1 && <View style={styles.divider} />}
           </View>
         ))}
       </View>
-
-      {!route.length && (
-        <View style={styles.emptyState}>
-          <Ionicons name="checkmark-done-circle-outline" size={42} color="#10A37F" />
-          <Text style={styles.emptyTitle}>오늘 배달을 모두 완료했어요</Text>
-          <Text style={styles.emptyCaption}>새 인수증이 등록되면 동선을 다시 계산합니다.</Text>
-        </View>
-      )}
     </ScrollView>
   );
 }
 
-function FinanceScreen({
-  deliveries,
-  fuelLogs,
-  mileageLogs,
-  settings,
-  onAddFuel,
-  onAddMileage,
-  onUpdateVehicle,
+type NotificationTone = 'danger' | 'warning' | 'info';
+
+function NotificationCard({
+  tone,
+  title,
+  body,
+  time,
+  icon,
 }: {
-  deliveries: Delivery[];
-  fuelLogs: FuelLog[];
-  mileageLogs: MileageLog[];
-  settings: FeeSettings;
-  onAddFuel: (log: FuelLog) => void;
-  onAddMileage: (log: MileageLog) => void;
-  onUpdateVehicle: (vehicleModel: string, fuelTankCapacity: number) => void;
+  tone: NotificationTone;
+  title: string;
+  body: string;
+  time: string;
+  icon: keyof typeof Ionicons.glyphMap;
 }) {
-  const dark = useDarkMode();
-  const [period, setPeriod] = useState<Period>('월간');
-  const [fuelModalOpen, setFuelModalOpen] = useState(false);
-  const [mileageModalOpen, setMileageModalOpen] = useState(false);
-  const [vehicleModalOpen, setVehicleModalOpen] = useState(false);
-  const [odometer, setOdometer] = useState('');
-  const [fuelOdometer, setFuelOdometer] = useState('');
-  const [amount, setAmount] = useState('');
-  const [price, setPrice] = useState('');
-  const [liters, setLiters] = useState('');
-  const [vehicleModel, setVehicleModel] = useState(settings.vehicleModel);
-  const [tankCapacity, setTankCapacity] = useState(String(settings.fuelTankCapacity));
-
-  const now = new Date();
-  const daysForPeriod = period === '일간' ? 1 : period === '주간' ? 7 : 31;
-  const startDate = new Date(now);
-  startDate.setDate(now.getDate() - (daysForPeriod - 1));
-  startDate.setHours(0, 0, 0, 0);
-  const inPeriod = (date: string) => new Date(date.replace(' ', 'T')) >= startDate;
-
-  const completedRevenue = deliveries
-    .filter((delivery) => delivery.status === 'completed' && inPeriod(delivery.deliveryDt))
-    .reduce((sum, delivery) => sum + delivery.fee, 0);
-  const periodFuelLogs = fuelLogs.filter((log) => inPeriod(log.date));
-  const periodMileageLogs = mileageLogs.filter((log) => inPeriod(log.date));
-  const expense = periodFuelLogs.reduce((sum, log) => sum + log.amount, 0);
-  const profit = completedRevenue - expense;
-  const margin = completedRevenue ? Math.max((profit / completedRevenue) * 100, 0) : 0;
-  const totalDistance = periodMileageLogs.reduce((sum, log) => sum + log.dailyDistanceKm, 0);
-  const totalLiters = periodFuelLogs.reduce((sum, log) => sum + log.liters, 0);
-  const actualEfficiency = totalLiters ? totalDistance / totalLiters : 0;
-  const latestOdometer = mileageLogs.length
-    ? Math.max(...mileageLogs.map((log) => log.odometerKm))
-    : 0;
-  const calculatedLiters = Number(liters) || (Number(amount) && Number(price)
-    ? Number(amount) / Number(price)
-    : 0);
-  const calculatedPrice = Number(price) || (Number(amount) && Number(liters)
-    ? Number(amount) / Number(liters)
-    : 0);
-  const tankFillRatio = settings.fuelTankCapacity
-    ? Math.min((calculatedLiters / settings.fuelTankCapacity) * 100, 100)
-    : 0;
-
-  const addFuel = () => {
-    const amountValue = Number(amount);
-    const litersValue = calculatedLiters;
-    const priceValue = calculatedPrice;
-    if (!amountValue || !litersValue || !priceValue) {
-      Alert.alert('입력값 확인', '주유 총액과 주유량 또는 리터당 단가를 입력해주세요.');
-      return;
-    }
-
-    onAddFuel({
-      id: `fuel-${Date.now()}`,
-      date: new Date().toISOString().slice(0, 10),
-      pricePerLiter: priceValue,
-      liters: litersValue,
-      amount: amountValue,
-      odometerKm: Number(fuelOdometer) || latestOdometer,
-    });
-    setFuelModalOpen(false);
-    setAmount('');
-    setLiters('');
-    setPrice('');
-    setFuelOdometer('');
-  };
-
-  const addMileage = () => {
-    const odometerValue = Number(odometer);
-    if (!odometerValue || odometerValue < latestOdometer) {
-      Alert.alert('계기판 확인', `현재 누적거리 ${latestOdometer.toLocaleString()}km 이상을 입력해주세요.`);
-      return;
-    }
-    const date = new Date().toISOString().slice(0, 10);
-    onAddMileage({
-      id: `mileage-${Date.now()}`,
-      date,
-      odometerKm: odometerValue,
-      dailyDistanceKm: latestOdometer ? odometerValue - latestOdometer : 0,
-    });
-    setOdometer('');
-    setMileageModalOpen(false);
-  };
-
+  const color = tone === 'danger' ? C.danger : tone === 'warning' ? C.warning : C.primary;
+  const background =
+    tone === 'danger' ? C.dangerBg : tone === 'warning' ? C.warningBg : C.primaryContainer;
   return (
-    <>
-      <ScrollView
-        contentContainerStyle={styles.screenContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={[styles.periodSelector, dark && styles.darkInset]}>
-          {(['일간', '주간', '월간'] as Period[]).map((item) => (
-            <Pressable
-              key={item}
-              style={[styles.periodButton, period === item && styles.periodButtonActive]}
-              onPress={() => setPeriod(item)}
-            >
-              <Text
-                style={[
-                  styles.periodButtonText,
-                  period === item && styles.periodButtonTextActive,
-                ]}
-              >
-                {item}
-              </Text>
-            </Pressable>
-          ))}
+    <View style={styles.notificationCard}>
+      <View style={[styles.notificationIcon, { backgroundColor: background }]}>
+        <Ionicons name={icon} size={21} color={color} />
+      </View>
+      <View style={styles.flex}>
+        <View style={styles.rowBetween}>
+          <Text style={[styles.notificationUrgency, { color }]}>
+            {tone === 'danger' ? '긴급' : tone === 'warning' ? '주의' : '안내'}
+          </Text>
+          <Text style={styles.notificationTime}>{time}</Text>
         </View>
-
-        <View style={[styles.vehicleSummaryCard, dark && styles.darkCard]}>
-          <View style={styles.vehicleSummaryTop}>
-            <View style={styles.vehicleIcon}>
-              <Ionicons name="car-sport" size={25} color="#2E6BFF" />
-            </View>
-            <View style={styles.flexOne}>
-              <Text style={[styles.vehicleName, dark && styles.darkText]}>
-                {settings.vehicleModel || '업무 차량을 등록해주세요'}
-              </Text>
-              <Text style={[styles.vehicleCaption, dark && styles.darkMutedText]}>
-                연료탱크 최대 {settings.fuelTankCapacity || 0}L · 계기판 {latestOdometer.toLocaleString()}km
-              </Text>
-            </View>
-            <Pressable testID="vehicle-settings-button" style={styles.vehicleEditButton} onPress={() => setVehicleModalOpen(true)}>
-              <Text style={styles.vehicleEditText}>차량 설정</Text>
-            </Pressable>
-          </View>
-        </View>
-
-        <LinearGradient
-          colors={['#142449', '#1E3769']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.profitCard}
-        >
-          <Text style={styles.profitLabel}>{period} 실제 손익</Text>
-          <Text style={styles.profitValue}>{money(profit)}</Text>
-          <View style={styles.profitChange}>
-            <Ionicons name="trending-up" size={15} color="#6EE7B7" />
-            <Text style={styles.profitChangeText}>수익률 {margin.toFixed(1)}%</Text>
-          </View>
-          <View style={styles.profitBreakdown}>
-            <View>
-              <Text style={styles.breakdownLabel}>배달 수익</Text>
-              <Text style={styles.breakdownValue}>{money(completedRevenue)}</Text>
-            </View>
-            <View style={styles.breakdownDivider} />
-            <View>
-              <Text style={styles.breakdownLabel}>유류 지출</Text>
-              <Text style={styles.breakdownValue}>{money(expense)}</Text>
-            </View>
-          </View>
-        </LinearGradient>
-
-        <View style={styles.quickStats}>
-          <StatCard
-            icon="car-sport-outline"
-            label={`${period} 주행거리`}
-            value={`${totalDistance.toFixed(0)}km`}
-            accent="#2E6BFF"
-          />
-          <StatCard
-            icon="leaf-outline"
-            label="실측 연비"
-            value={`${actualEfficiency.toFixed(1)}km/L`}
-            accent="#10A37F"
-          />
-        </View>
-
-        <View style={styles.financeActions}>
-          <Pressable testID="mileage-add-button" style={styles.mileageAction} onPress={() => setMileageModalOpen(true)}>
-            <Ionicons name="speedometer-outline" size={21} color="#2E6BFF" />
-            <View>
-              <Text style={styles.financeActionTitle}>오늘 계기판 입력</Text>
-              <Text style={styles.financeActionCaption}>매일 누적 주행거리 기록</Text>
-            </View>
-          </Pressable>
-          <Pressable testID="fuel-add-button" style={styles.fuelAction} onPress={() => setFuelModalOpen(true)}>
-            <Ionicons name="water-outline" size={21} color="#E46F20" />
-            <View>
-              <Text style={styles.financeActionTitle}>주유 기록</Text>
-              <Text style={styles.financeActionCaption}>금액·리터·단가 입력</Text>
-            </View>
-          </Pressable>
-        </View>
-
-        <SectionTitle
-          title="일일 주행 기록"
-          caption={`${mileageLogs.length}일 기록`}
-          action={
-            <Pressable style={styles.addMiniButton} onPress={() => setMileageModalOpen(true)}>
-              <Ionicons name="add" size={17} color="#2E6BFF" />
-              <Text style={styles.addMiniText}>오늘 입력</Text>
-            </Pressable>
-          }
-        />
-        <View style={[styles.logCard, dark && styles.darkCard]}>
-          {[...mileageLogs].reverse().map((log, index) => (
-            <View key={log.id} style={[styles.logRow, index < mileageLogs.length - 1 && styles.logRowBorder]}>
-              <View style={[styles.fuelIcon, { backgroundColor: '#EDF2FF' }]}>
-                <Ionicons name="speedometer-outline" size={20} color="#2E6BFF" />
-              </View>
-              <View style={styles.flexOne}>
-                <Text style={[styles.logTitle, dark && styles.darkText]}>{log.date}</Text>
-                <Text style={[styles.logCaption, dark && styles.darkMutedText]}>
-                  계기판 {log.odometerKm.toLocaleString()}km
-                </Text>
-              </View>
-              <Text style={styles.mileageAmount}>+{log.dailyDistanceKm.toFixed(0)}km</Text>
-            </View>
-          ))}
-        </View>
-
-        <SectionTitle
-          title="주유 기록"
-          caption={`${fuelLogs.length}건`}
-          action={
-            <Pressable style={styles.addMiniButton} onPress={() => setFuelModalOpen(true)}>
-              <Ionicons name="add" size={17} color="#2E6BFF" />
-              <Text style={styles.addMiniText}>기록 추가</Text>
-            </Pressable>
-          }
-        />
-        <View style={[styles.logCard, dark && styles.darkCard]}>
-          {[...fuelLogs].reverse().map((log, index) => (
-            <View
-              key={log.id}
-              style={[styles.logRow, index < fuelLogs.length - 1 && styles.logRowBorder]}
-            >
-              <View style={styles.fuelIcon}>
-                <Ionicons name="water-outline" size={20} color="#FF7A28" />
-              </View>
-              <View style={styles.flexOne}>
-                <Text style={styles.logTitle}>{log.date} 주유</Text>
-                <Text style={styles.logCaption}>
-                  {log.liters.toFixed(1)}L · L당 {CURRENCY.format(Math.round(log.pricePerLiter))}원
-                </Text>
-              </View>
-              <Text style={styles.logAmount}>-{money(log.amount)}</Text>
-            </View>
-          ))}
-        </View>
-      </ScrollView>
-
-      <Modal visible={mileageModalOpen} transparent animationType="slide" onRequestClose={() => setMileageModalOpen(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
-          <View style={[styles.modalSheet, dark && styles.darkCard]}>
-            <View style={styles.modalHandle} />
-            <SectionTitle title="오늘 계기판 기록" caption={`이전 계기판 ${latestOdometer.toLocaleString()}km`} action={
-              <Pressable onPress={() => setMileageModalOpen(false)}><Ionicons name="close" size={24} color="#65748B" /></Pressable>
-            } />
-            <LabeledInput label="현재 계기판 누적거리 (km)" value={odometer} keyboardType="numeric" onChangeText={setOdometer} placeholder="예: 82745" />
-            <View style={styles.calculatedAmount}>
-              <Text style={styles.calculatedLabel}>오늘 주행거리</Text>
-              <Text style={styles.calculatedValue}>{Math.max(Number(odometer) - latestOdometer, 0).toFixed(0)}km</Text>
-            </View>
-            <Pressable style={styles.primaryButton} onPress={addMileage}><Text style={styles.primaryButtonText}>주행거리 저장</Text></Pressable>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      <Modal
-        visible={fuelModalOpen}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setFuelModalOpen(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalBackdrop}
-        >
-          <View style={[styles.modalSheet, dark && styles.darkCard]}>
-            <View style={styles.modalHandle} />
-            <SectionTitle
-              title="주유 기록 추가"
-              caption={`탱크 최대 ${settings.fuelTankCapacity}L`}
-              action={
-                <Pressable onPress={() => setFuelModalOpen(false)}>
-                  <Ionicons name="close" size={24} color="#65748B" />
-                </Pressable>
-              }
-            />
-            <LabeledInput
-              label="주유 시 계기판 누적거리 (km)"
-              value={fuelOdometer}
-              keyboardType="numeric"
-              onChangeText={setFuelOdometer}
-              placeholder={String(latestOdometer || 82745)}
-            />
-            <LabeledInput
-              label="주유 총액 (원) *"
-              value={amount}
-              keyboardType="numeric"
-              onChangeText={setAmount}
-              placeholder="예: 50000"
-            />
-            <LabeledInput
-              label="넣은 기름의 양 (L)"
-              value={liters}
-              keyboardType="numeric"
-              onChangeText={setLiters}
-              placeholder="예: 29.6"
-            />
-            <LabeledInput
-              label="리터당 가격 (원)"
-              value={price}
-              keyboardType="numeric"
-              onChangeText={setPrice}
-              placeholder="예: 1690"
-            />
-            <View style={styles.calculatedAmount}>
-              <Text style={styles.calculatedLabel}>자동 계산</Text>
-              <Text style={styles.calculatedValue}>
-                {calculatedLiters.toFixed(1)}L · L당 {CURRENCY.format(Math.round(calculatedPrice))}원
-              </Text>
-            </View>
-            <View style={styles.tankGauge}>
-              <View style={[styles.tankGaugeFill, { width: `${tankFillRatio}%` }]} />
-            </View>
-            <Text style={styles.tankGaugeText}>최대 탱크의 {tankFillRatio.toFixed(0)}% 주유</Text>
-            <Pressable style={styles.primaryButton} onPress={addFuel}>
-              <Text style={styles.primaryButtonText}>기록 저장</Text>
-            </Pressable>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      <Modal visible={vehicleModalOpen} transparent animationType="slide" onRequestClose={() => setVehicleModalOpen(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
-          <View style={[styles.modalSheet, dark && styles.darkCard]}>
-            <View style={styles.modalHandle} />
-            <SectionTitle title="업무 차량 등록" caption="차종별 탱크 용량을 등록하세요" action={
-              <Pressable onPress={() => setVehicleModalOpen(false)}><Ionicons name="close" size={24} color="#65748B" /></Pressable>
-            } />
-            <LabeledInput label="차량 차종" value={vehicleModel} onChangeText={setVehicleModel} placeholder="예: 현대 포터2" />
-            <LabeledInput label="연료탱크 최대 용량 (L)" value={tankCapacity} keyboardType="numeric" onChangeText={setTankCapacity} placeholder="예: 65" />
-            <Pressable style={styles.primaryButton} onPress={() => {
-              if (!vehicleModel || !Number(tankCapacity)) return Alert.alert('차량 정보 확인', '차종과 연료탱크 용량을 입력해주세요.');
-              onUpdateVehicle(vehicleModel, Number(tankCapacity));
-              setVehicleModalOpen(false);
-            }}><Text style={styles.primaryButtonText}>차량 정보 저장</Text></Pressable>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-    </>
+        <Text style={styles.notificationTitle}>{title}</Text>
+        <Text style={styles.notificationBody}>{body}</Text>
+      </View>
+    </View>
   );
 }
 
-function NumberSetting({
+function NotificationsScreen() {
+  return (
+    <ScrollView contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
+      <ScreenHeader
+        eyebrow="ALERT CENTER"
+        title="알림"
+        subtitle="긴급도가 높은 알림부터 표시합니다."
+      />
+      <View style={styles.notificationSummary}>
+        <View>
+          <Text style={styles.notificationSummaryLabel}>확인 필요한 알림</Text>
+          <Text style={styles.notificationSummaryValue}>3건</Text>
+        </View>
+        <View style={styles.urgencyLegend}>
+          <View style={[styles.legendDot, { backgroundColor: C.danger }]} />
+          <Text style={styles.legendText}>긴급 1</Text>
+          <View style={[styles.legendDot, { backgroundColor: C.warning }]} />
+          <Text style={styles.legendText}>주의 1</Text>
+        </View>
+      </View>
+      <SectionHeader title="오늘" />
+      <View style={styles.notificationList}>
+        <NotificationCard
+          tone="danger"
+          icon="calendar-outline"
+          title="예식 시간 30분 전"
+          body="축하 3단 화환 설치를 11:00 이전에 완료해야 합니다."
+          time="10:30"
+        />
+        <NotificationCard
+          tone="warning"
+          icon="speedometer-outline"
+          title="도착 지연 위험"
+          body="송파구 목적지의 예상 도착 시간이 엄수 마감과 12분 차이입니다."
+          time="10:18"
+        />
+        <NotificationCard
+          tone="info"
+          icon="swap-horizontal-outline"
+          title="추천 동선이 변경되었습니다"
+          body="교통 상황을 반영해 서초구 방문 순서가 2번으로 조정되었습니다."
+          time="09:52"
+        />
+      </View>
+      <SectionHeader title="이전 알림" />
+      <NotificationCard
+        tone="info"
+        icon="checkmark-done-outline"
+        title="첫 번째 배송 완료"
+        body="강남구 학동로 배송이 정상적으로 완료되었습니다."
+        time="09:14"
+      />
+    </ScrollView>
+  );
+}
+
+function SettingRow({
+  icon,
+  title,
+  caption,
+  trailing,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  title: string;
+  caption: string;
+  trailing?: React.ReactNode;
+  onPress?: () => void;
+}) {
+  return (
+    <Pressable style={styles.settingRow} onPress={onPress}>
+      <View style={styles.settingIcon}>
+        <Ionicons name={icon} size={21} color={C.primary} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.settingTitle}>{title}</Text>
+        <Text style={styles.settingCaption}>{caption}</Text>
+      </View>
+      {trailing || <Ionicons name="chevron-forward" size={20} color={C.textMuted} />}
+    </Pressable>
+  );
+}
+
+function SettingsScreen() {
+  const [deadlineAlerts, setDeadlineAlerts] = useState(true);
+  const [eventAlerts, setEventAlerts] = useState(true);
+  const [routeAlerts, setRouteAlerts] = useState(true);
+  const [avoidTolls, setAvoidTolls] = useState(false);
+
+  return (
+    <ScrollView contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
+      <ScreenHeader
+        eyebrow="APP PREFERENCES"
+        title="설정"
+        subtitle="업무 알림과 경로 계산 방식을 관리합니다."
+      />
+      <View style={styles.profileCard}>
+        <View style={styles.profileAvatar}>
+          <Ionicons name="person" size={27} color={C.primary} />
+        </View>
+        <View style={styles.flex}>
+          <Text style={styles.profileName}>업무 기사 프로필</Text>
+          <Text style={styles.profileCaption}>현대 포터2 · 업무 차량 등록됨</Text>
+        </View>
+        <Pressable style={styles.iconButton}>
+          <Ionicons name="pencil-outline" size={19} color={C.primary} />
+        </Pressable>
+      </View>
+
+      <SectionHeader title="알림 설정" />
+      <View style={styles.settingsGroup}>
+        <SettingRow
+          icon="alarm-outline"
+          title="엄수 마감 알림"
+          caption="마감 30분·15분 전에 알림"
+          trailing={<Switch value={deadlineAlerts} onValueChange={setDeadlineAlerts} trackColor={{ true: C.primary }} />}
+        />
+        <View style={styles.divider} />
+        <SettingRow
+          icon="calendar-outline"
+          title="예식 시간 알림"
+          caption="예식 배송을 최우선으로 경고"
+          trailing={<Switch value={eventAlerts} onValueChange={setEventAlerts} trackColor={{ true: C.primary }} />}
+        />
+        <View style={styles.divider} />
+        <SettingRow
+          icon="warning-outline"
+          title="경로 변경·지연 알림"
+          caption="도착 지연 가능성이 있을 때 알림"
+          trailing={<Switch value={routeAlerts} onValueChange={setRouteAlerts} trackColor={{ true: C.primary }} />}
+        />
+      </View>
+
+      <SectionHeader title="경로 설정" />
+      <View style={styles.settingsGroup}>
+        <SettingRow icon="car-outline" title="이동 수단" caption="업무용 차량 · 자동차" />
+        <View style={styles.divider} />
+        <SettingRow
+          icon="cash-outline"
+          title="유료도로 제외"
+          caption="통행료가 발생하는 경로를 피합니다"
+          trailing={<Switch value={avoidTolls} onValueChange={setAvoidTolls} trackColor={{ true: C.primary }} />}
+        />
+        <View style={styles.divider} />
+        <SettingRow icon="map-outline" title="지도 앱" caption="Google 지도" />
+      </View>
+
+      <SectionHeader title="앱 설정" />
+      <View style={styles.settingsGroup}>
+        <SettingRow icon="color-palette-outline" title="화면 모드" caption="시스템 기본 설정 사용" />
+        <View style={styles.divider} />
+        <SettingRow icon="language-outline" title="언어" caption="한국어" />
+        <View style={styles.divider} />
+        <SettingRow icon="information-circle-outline" title="앱 정보" caption="RouteLO 1.0.0" />
+      </View>
+    </ScrollView>
+  );
+}
+
+function DeliveryDetailSheet({
+  delivery,
+  visible,
+  onClose,
+  onToggle,
+}: {
+  delivery?: Delivery;
+  visible: boolean;
+  onClose: () => void;
+  onToggle: () => void;
+}) {
+  if (!delivery) return null;
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.bottomSheet}>
+          <View style={styles.sheetHandle} />
+          <View style={styles.sheetHeader}>
+            <View>
+              <Text style={styles.sheetEyebrow}>배송 상세</Text>
+              <Text style={styles.sheetTitle}>{delivery.productName}</Text>
+            </View>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={22} color={C.text} />
+            </Pressable>
+          </View>
+          <StatusBadge status={delivery.status} />
+          <View style={styles.sheetAddress}>
+            <Ionicons name="location-outline" size={20} color={C.primary} />
+            <Text style={styles.sheetAddressText}>{delivery.deliveryAddress}</Text>
+          </View>
+          <View style={styles.sheetTimeGrid}>
+            <View style={styles.sheetTimeItem}>
+              <Text style={styles.sheetTimeLabel}>엄수 마감</Text>
+              <Text style={[styles.sheetTimeValue, styles.warningText]}>
+                {timeOf(delivery.deliveryDt)}
+              </Text>
+            </View>
+            <View style={styles.sheetTimeItem}>
+              <Text style={styles.sheetTimeLabel}>예식 시간</Text>
+              <Text style={[styles.sheetTimeValue, isEventDelivery(delivery) && styles.dangerText]}>
+                {delivery.eventTime || '-'}
+              </Text>
+            </View>
+            <View style={styles.sheetTimeItem}>
+              <Text style={styles.sheetTimeLabel}>수량</Text>
+              <Text style={styles.sheetTimeValue}>{delivery.productQuantity}개</Text>
+            </View>
+          </View>
+          <View style={styles.sheetInfoBlock}>
+            <Text style={styles.sheetInfoLabel}>요청사항</Text>
+            <Text style={styles.sheetInfoText}>{delivery.customerRequests}</Text>
+          </View>
+          <View style={styles.sheetActions}>
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={() => Linking.openURL(`tel:${delivery.recipientTel}`)}
+            >
+              <Ionicons name="call-outline" size={18} color={C.primary} />
+              <Text style={styles.secondaryButtonText}>수령인 전화</Text>
+            </Pressable>
+            <Pressable style={styles.primaryButton} onPress={onToggle}>
+              <Ionicons
+                name={delivery.status === 'completed' ? 'refresh-outline' : 'checkmark'}
+                size={18}
+                color="#FFFFFF"
+              />
+              <Text style={styles.primaryButtonText}>
+                {delivery.status === 'completed' ? '대기로 변경' : '배송 완료'}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+type ScanStage = 'capture' | 'quality' | 'processing' | 'review';
+
+const OCR_FIELD_ICONS: Record<OcrFieldKey, keyof typeof Ionicons.glyphMap> = {
+  deliveryDate: 'calendar-outline',
+  strictTime: 'alarm-outline',
+  eventTime: 'time-outline',
+  venueName: 'business-outline',
+  deliveryAddress: 'location-outline',
+  recipientName: 'person-outline',
+  recipientTel: 'call-outline',
+  orderNumber: 'barcode-outline',
+  memo: 'document-text-outline',
+};
+
+function ConfidenceBadge({ field }: { field: OcrFieldResult }) {
+  const confirmed = field.status === 'confirmed';
+  const review = field.status === 'review';
+  const color = confirmed ? C.success : review ? C.warning : C.danger;
+  const background = confirmed ? C.successBg : review ? C.warningBg : C.dangerBg;
+  return (
+    <View style={[styles.confidenceBadge, { backgroundColor: background }]}>
+      <Ionicons
+        name={confirmed ? 'checkmark-circle' : review ? 'help-circle' : 'warning'}
+        size={14}
+        color={color}
+      />
+      <Text style={[styles.confidenceText, { color }]}>{field.confidence}%</Text>
+    </View>
+  );
+}
+
+function QualityMeter({
   label,
-  unit,
   value,
-  onChange,
+  icon,
 }: {
   label: string;
-  unit: string;
   value: number;
-  onChange: (value: number) => void;
+  icon: keyof typeof Ionicons.glyphMap;
 }) {
-  const dark = useDarkMode();
+  const color = value >= 80 ? C.success : value >= 60 ? C.warning : C.danger;
   return (
-    <View style={styles.settingInputRow}>
-      <Text style={[styles.settingInputLabel, dark && styles.darkText]}>{label}</Text>
-      <View style={[styles.numberInputWrap, dark && styles.darkInput]}>
-        <TextInput
-          value={String(value)}
-          keyboardType="numeric"
-          onChangeText={(text) => onChange(Number(text.replace(/[^0-9.]/g, '')) || 0)}
-          style={[styles.numberInput, dark && styles.darkText]}
-        />
-        <Text style={styles.numberUnit}>{unit}</Text>
+    <View style={styles.qualityRow}>
+      <View style={styles.qualityLabelGroup}>
+        <Ionicons name={icon} size={17} color={color} />
+        <Text style={styles.qualityLabel}>{label}</Text>
       </View>
+      <View style={styles.qualityTrack}>
+        <View style={[styles.qualityFill, { width: `${value}%`, backgroundColor: color }]} />
+      </View>
+      <Text style={[styles.qualityValue, { color }]}>{value}</Text>
     </View>
   );
 }
 
-function SettingsScreen({
-  settings,
-  onSave,
-  onResetData,
+function OcrScannerModal({
+  visible,
+  onClose,
+  onRegister,
 }: {
-  settings: FeeSettings;
-  onSave: (settings: FeeSettings) => void;
-  onResetData: () => void;
+  visible: boolean;
+  onClose: () => void;
+  onRegister: (delivery: Delivery) => void;
 }) {
-  const [draft, setDraft] = useState(settings);
-  const dark = useDarkMode();
-  useEffect(() => setDraft(settings), [settings]);
-  const updateDistrictFee = (district: string, value: number) =>
-    setDraft((current) => ({
-      ...current,
-      districtFees: { ...current.districtFees, [district]: value },
-    }));
-  const setTheme = (themeMode: FeeSettings['themeMode']) => {
-    const next = { ...draft, themeMode };
-    setDraft(next);
-    onSave(next);
+  const [stage, setStage] = useState<ScanStage>('capture');
+  const [imageUri, setImageUri] = useState<string>();
+  const [assetInfo, setAssetInfo] = useState<{ width?: number; height?: number; fileSize?: number }>({});
+  const [result, setResult] = useState<OcrPipelineResult>();
+  const [fields, setFields] = useState<OcrFieldResult[]>([]);
+
+  const reset = () => {
+    setStage('capture');
+    setImageUri(undefined);
+    setAssetInfo({});
+    setResult(undefined);
+    setFields([]);
   };
 
-  const DistrictSection = ({
-    title,
-    caption,
-    districts,
-  }: {
-    title: string;
-    caption: string;
-    districts: readonly string[];
-  }) => (
-    <View style={[styles.settingsCard, dark && styles.darkCard]}>
-      <SectionTitle title={title} caption={caption} />
-      {districts.map((district) => (
-        <NumberSetting
-          key={district}
-          label={district}
-          unit="원"
-          value={draft.districtFees[district] ?? 15000}
-          onChange={(value) => updateDistrictFee(district, value)}
-        />
-      ))}
-    </View>
-  );
+  useEffect(() => {
+    if (!visible) reset();
+  }, [visible]);
+
+  const selectImage = async (camera: boolean) => {
+    const permission = camera
+      ? await ImagePicker.requestCameraPermissionsAsync()
+      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('권한 필요', '인수증을 촬영하거나 불러오려면 사진 접근 권한이 필요합니다.');
+      return;
+    }
+    const picked = camera
+      ? await ImagePicker.launchCameraAsync({
+          mediaTypes: ['images'],
+          quality: 1,
+          allowsEditing: false,
+        })
+      : await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ['images'],
+          quality: 1,
+          allowsEditing: false,
+        });
+    if (picked.canceled) return;
+    const asset = picked.assets[0];
+    const info = { width: asset.width, height: asset.height, fileSize: asset.fileSize };
+    setImageUri(asset.uri);
+    setAssetInfo(info);
+    setResult({
+      engine: 'mlkit-demo',
+      rawText: '',
+      fields: [],
+      documentConfidence: 0,
+      quality: inspectCaptureQuality(info),
+      processingMs: 0,
+      variantsCompared: 0,
+    });
+    setStage('quality');
+  };
+
+  const useDemoReceipt = () => {
+    const info = { width: 1440, height: 1920, fileSize: 780000 };
+    setAssetInfo(info);
+    setResult({
+      engine: 'mlkit-demo',
+      rawText: '',
+      fields: [],
+      documentConfidence: 0,
+      quality: inspectCaptureQuality(info),
+      processingMs: 0,
+      variantsCompared: 0,
+    });
+    setStage('quality');
+  };
+
+  const analyze = async () => {
+    if (result && !result.quality.passed) {
+      Alert.alert('재촬영 권장', result.quality.messages[0] || '촬영 품질을 확인해주세요.');
+      return;
+    }
+    setStage('processing');
+    const next = await runHybridOcr(assetInfo);
+    setResult(next);
+    setFields(next.fields);
+    setStage('review');
+  };
+
+  const updateField = (key: OcrFieldKey, value: string) => {
+    setFields((current) =>
+      current.map((item) =>
+        item.key === key
+          ? { ...item, value, confidence: value ? Math.max(item.confidence, 85) : 0, status: value ? 'confirmed' : 'missing' }
+          : item,
+      ),
+    );
+  };
+
+  const valueOf = (key: OcrFieldKey) => fields.find((item) => item.key === key)?.value || '';
+
+  const register = () => {
+    const missing = fields.filter((field) => field.required && !field.value.trim());
+    if (missing.length) {
+      Alert.alert(
+        '필수값 확인',
+        `${missing.map((field) => field.label).join(', ')} 항목을 입력해주세요.`,
+      );
+      return;
+    }
+    const strictTime = valueOf('strictTime');
+    const eventTime = valueOf('eventTime');
+    const venue = valueOf('venueName');
+    const address = valueOf('deliveryAddress');
+    const delivery: Delivery = {
+      id: `delivery-${Date.now()}`,
+      orderVendor: venue,
+      orderVendorTel: '',
+      deliveryVendor: '로즈플라워',
+      deliveryVendorTel: '02-2038-1188',
+      productName: eventTime ? '축하 화환' : '배송 상품',
+      productQuantity: 1,
+      eventTime,
+      deliveryDt: `${valueOf('deliveryDate')} ${strictTime}`,
+      deliveryAddress: address,
+      customerRequests: valueOf('memo'),
+      recipientTel: valueOf('recipientTel'),
+      status: 'pending',
+      distanceKm: 5 + ((address.length * 3) % 80) / 10,
+      fee: 15000,
+      latitude: 37.49 + (address.length % 30) / 1000,
+      longitude: 127.02 + (address.length % 50) / 1000,
+    };
+    onRegister(delivery);
+    Alert.alert('등록 완료', '검수된 OCR 정보가 오늘의 배달 목록에 추가되었습니다.');
+    onClose();
+  };
+
+  const quality = result?.quality;
 
   return (
-    <ScrollView
-      contentContainerStyle={styles.screenContent}
-      showsVerticalScrollIndicator={false}
-      keyboardShouldPersistTaps="handled"
-    >
-      <View style={[styles.settingsIntro, dark && styles.darkBlueInset]}>
-        <View style={styles.settingsIntroIcon}>
-          <Ionicons name="calculator-outline" size={23} color="#2E6BFF" />
-        </View>
-        <View style={styles.flexOne}>
-          <Text style={styles.settingsIntroTitle}>내 운행 기준에 맞게 설정하세요</Text>
-          <Text style={styles.settingsIntroText}>
-            변경된 기준은 새 배달의 예상 수수료부터 적용됩니다.
-          </Text>
-        </View>
-      </View>
-
-      <View style={[styles.settingsCard, dark && styles.darkCard]}>
-        <SectionTitle title="화면 테마" caption="앱 전체 표시 방식을 선택하세요" />
-        <View style={styles.themeSelector}>
-          {([
-            ['light', 'sunny-outline', '라이트 모드'],
-            ['dark', 'moon-outline', '다크 모드'],
-          ] as const).map(([mode, icon, label]) => {
-            const selected = draft.themeMode === mode;
-            return (
-              <Pressable
-                key={mode}
-                testID={`theme-${mode}`}
-                style={[
-                  styles.themeOption,
-                  dark && styles.darkInset,
-                  selected && styles.themeOptionSelected,
-                ]}
-                onPress={() => setTheme(mode)}
-              >
-                <Ionicons
-                  name={icon}
-                  size={21}
-                  color={selected ? '#2E6BFF' : dark ? '#AAB8D0' : '#68768C'}
-                />
-                <Text
-                  style={[
-                    styles.themeOptionText,
-                    dark && styles.darkText,
-                    selected && styles.themeOptionTextSelected,
-                  ]}
-                >
-                  {label}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-      </View>
-
-      <DistrictSection
-        title="서울시 지역별 배달 수수료"
-        caption={`가나다순 · ${SEOUL_DISTRICTS.length}개 자치구`}
-        districts={SEOUL_DISTRICTS}
-      />
-      <DistrictSection
-        title="경기도 지역별 배달 수수료"
-        caption={`가나다순 · ${GYEONGGI_DISTRICTS.length}개 시·군`}
-        districts={GYEONGGI_DISTRICTS}
-      />
-
-      <View style={[styles.settingsCard, dark && styles.darkCard]}>
-        <SectionTitle title="차량 정보" caption="주유 계산기에서 수정할 수 있습니다" />
-        <View style={styles.vehicleRow}>
-          <View style={styles.vehicleIcon}>
-            <Ionicons name="car-sport" size={25} color="#2E6BFF" />
-          </View>
-          <View style={styles.flexOne}>
-            <Text style={[styles.vehicleName, dark && styles.darkText]}>{draft.vehicleModel}</Text>
-            <Text style={[styles.vehicleCaption, dark && styles.darkMutedText]}>
-              연료탱크 최대 {draft.fuelTankCapacity}L · 계기판 기반 실측
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.scannerApp}>
+        <StatusBar style="dark" />
+        <View style={styles.scannerHeader}>
+          <Pressable style={styles.iconButton} onPress={onClose}>
+            <Ionicons name="close" size={22} color={C.text} />
+          </Pressable>
+          <View style={styles.scannerHeaderCopy}>
+            <Text style={styles.scannerEyebrow}>SMART DOCUMENT OCR</Text>
+            <Text style={styles.scannerTitle}>
+              {stage === 'capture'
+                ? '인수증 스캔'
+                : stage === 'quality'
+                  ? '촬영 품질 검사'
+                  : stage === 'processing'
+                    ? '문서 분석 중'
+                    : '추출 결과 확인'}
             </Text>
           </View>
-          <Ionicons name="chevron-forward" size={20} color="#AAB4C4" />
-        </View>
-      </View>
-
-      <View style={[styles.settingsCard, dark && styles.darkCard]}>
-        <SectionTitle title="연동 상태" />
-        <View style={styles.integrationRow}>
-          <View style={[styles.integrationIcon, { backgroundColor: '#FFE500' }]}>
-            <Ionicons name="map" size={20} color="#2A2A2A" />
-          </View>
-          <View style={styles.flexOne}>
-            <Text style={styles.integrationTitle}>Google 지도</Text>
-            <Text style={styles.integrationCaption}>API 키 없이 방문 순서 길찾기 링크 사용</Text>
-          </View>
-          <View style={styles.readyBadge}>
-            <Text style={styles.readyText}>사용 가능</Text>
+          <View style={styles.scannerStep}>
+            <Text style={styles.scannerStepText}>
+              {stage === 'capture' ? '1/4' : stage === 'quality' ? '2/4' : stage === 'processing' ? '3/4' : '4/4'}
+            </Text>
           </View>
         </View>
-        <View style={styles.integrationDivider} />
-        <View style={styles.integrationRow}>
-          <View style={[styles.integrationIcon, { backgroundColor: '#E7F8F2' }]}>
-            <Ionicons name="scan" size={20} color="#10A37F" />
-          </View>
-          <View style={styles.flexOne}>
-            <Text style={styles.integrationTitle}>OCR 엔진</Text>
-            <Text style={styles.integrationCaption}>현재 데모 파서 · 클라우드 OCR 교체 가능</Text>
-          </View>
-          <View style={styles.demoBadge}>
-            <Text style={styles.demoText}>데모</Text>
-          </View>
-        </View>
-      </View>
 
-      <Pressable
-        style={styles.primaryButton}
-        onPress={() => {
-          onSave(draft);
-          Alert.alert('저장 완료', '56개 지역 수수료와 차량 설정이 저장되었습니다.');
-        }}
-      >
-        <Ionicons name="save-outline" size={20} color="#FFFFFF" />
-        <Text style={styles.primaryButtonText}>설정 저장</Text>
-      </Pressable>
+        {stage === 'capture' && (
+          <ScrollView contentContainerStyle={styles.scannerContent}>
+            <View style={styles.captureGuide}>
+              <View style={[styles.captureCorner, styles.captureCornerTopLeft]} />
+              <View style={[styles.captureCorner, styles.captureCornerTopRight]} />
+              <View style={[styles.captureCorner, styles.captureCornerBottomLeft]} />
+              <View style={[styles.captureCorner, styles.captureCornerBottomRight]} />
+              <View style={styles.documentPreview}>
+                <Ionicons name="document-text-outline" size={55} color="#89A7E8" />
+                <Text style={styles.documentPreviewTitle}>인수증 전체를 프레임에 맞춰주세요</Text>
+                <Text style={styles.documentPreviewCaption}>
+                  흔들림·밝기·기울기·문서 잘림을 촬영 직후 자동 검사합니다.
+                </Text>
+              </View>
+              <View style={styles.autoCaptureBadge}>
+                <View style={styles.autoCaptureDot} />
+                <Text style={styles.autoCaptureText}>자동 촬영 조건 확인 중</Text>
+              </View>
+            </View>
+            <View style={styles.captureTips}>
+              <View style={styles.captureTip}>
+                <Ionicons name="sunny-outline" size={20} color={C.primary} />
+                <Text style={styles.captureTipText}>밝은 곳</Text>
+              </View>
+              <View style={styles.captureTip}>
+                <Ionicons name="scan-outline" size={20} color={C.primary} />
+                <Text style={styles.captureTipText}>문서 전체</Text>
+              </View>
+              <View style={styles.captureTip}>
+                <Ionicons name="phone-portrait-outline" size={20} color={C.primary} />
+                <Text style={styles.captureTipText}>수직 촬영</Text>
+              </View>
+            </View>
+            <Pressable style={styles.scanPrimaryButton} onPress={() => selectImage(true)}>
+              <Ionicons name="camera" size={21} color="#FFFFFF" />
+              <Text style={styles.scanPrimaryButtonText}>카메라로 촬영</Text>
+            </Pressable>
+            <Pressable style={styles.scanSecondaryButton} onPress={() => selectImage(false)}>
+              <Ionicons name="images-outline" size={20} color={C.primary} />
+              <Text style={styles.scanSecondaryButtonText}>갤러리에서 선택</Text>
+            </Pressable>
+            <Pressable style={styles.demoReceiptButton} onPress={useDemoReceipt}>
+              <Ionicons name="flask-outline" size={18} color={C.textMuted} />
+              <Text style={styles.demoReceiptText}>샘플 인수증으로 OCR 파이프라인 테스트</Text>
+            </Pressable>
+          </ScrollView>
+        )}
 
-      <Pressable
-        style={styles.resetButton}
-        onPress={() =>
-          Alert.alert('샘플 데이터 초기화', '등록된 배달과 주유 기록을 초기 상태로 되돌릴까요?', [
-            { text: '취소', style: 'cancel' },
-            { text: '초기화', style: 'destructive', onPress: onResetData },
-          ])
-        }
-      >
-        <Text style={styles.resetButtonText}>샘플 데이터 초기화</Text>
-      </Pressable>
+        {stage === 'quality' && quality && (
+          <ScrollView contentContainerStyle={styles.scannerContent}>
+            <View style={styles.qualityPreview}>
+              {imageUri ? (
+                <Image source={{ uri: imageUri }} style={styles.qualityImage} />
+              ) : (
+                <View style={styles.qualityDemoImage}>
+                  <Ionicons name="receipt-outline" size={52} color={C.primary} />
+                  <Text style={styles.qualityDemoText}>샘플 배송 인수증</Text>
+                </View>
+              )}
+              <View style={styles.documentBoundary} />
+              <View style={[styles.qualityScoreCircle, { borderColor: quality.passed ? C.success : C.warning }]}>
+                <Text style={[styles.qualityScore, { color: quality.passed ? C.success : C.warning }]}>
+                  {quality.score}
+                </Text>
+                <Text style={styles.qualityScoreLabel}>품질</Text>
+              </View>
+            </View>
+            <View style={styles.qualityCard}>
+              <View style={styles.qualityCardHeader}>
+                <Text style={styles.qualityCardTitle}>촬영 품질 분석</Text>
+                <View style={[styles.badge, quality.passed ? styles.successBadge : styles.waitBadge]}>
+                  <Text style={[styles.badgeText, { color: quality.passed ? C.success : C.warning }]}>
+                    {quality.passed ? 'OCR 진행 가능' : '재촬영 권장'}
+                  </Text>
+                </View>
+              </View>
+              <QualityMeter label="선명도" value={quality.blur} icon="aperture-outline" />
+              <QualityMeter label="밝기" value={quality.brightness} icon="sunny-outline" />
+              <QualityMeter label="문서 영역" value={quality.documentCoverage} icon="scan-outline" />
+              <QualityMeter label="기울기" value={quality.skew} icon="move-outline" />
+              <QualityMeter label="그림자" value={quality.shadow} icon="contrast-outline" />
+            </View>
+            {quality.messages.map((message) => (
+              <View key={message} style={styles.qualityWarning}>
+                <Ionicons name="warning-outline" size={18} color={C.warning} />
+                <Text style={styles.qualityWarningText}>{message}</Text>
+              </View>
+            ))}
+            <View style={styles.variantInfo}>
+              <Ionicons name="layers-outline" size={20} color={C.primary} />
+              <Text style={styles.variantInfoText}>
+                원본·밝기·대비·기울기·임계값·샤프닝 6개 버전을 비교합니다.
+              </Text>
+            </View>
+            <View style={styles.scanActionRow}>
+              <Pressable style={styles.scanSecondaryFlex} onPress={reset}>
+                <Text style={styles.scanSecondaryButtonText}>다시 촬영</Text>
+              </Pressable>
+              <Pressable style={styles.scanPrimaryFlex} onPress={analyze}>
+                <Text style={styles.scanPrimaryButtonText}>OCR 분석 시작</Text>
+                <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
+              </Pressable>
+            </View>
+          </ScrollView>
+        )}
 
-      <Text style={styles.versionText}>RouteLO v1.0.0 · Local-first MVP</Text>
-    </ScrollView>
+        {stage === 'processing' && (
+          <View style={styles.processingScreen}>
+            <View style={styles.processingIcon}>
+              <ActivityIndicator size="large" color={C.primary} />
+            </View>
+            <Text style={styles.processingTitle}>인수증을 정밀 분석하고 있습니다</Text>
+            <Text style={styles.processingCaption}>
+              문서 보정, 6개 이미지 비교, 한국어 OCR, 필드 후보 검증을 수행합니다.
+            </Text>
+            {['문서 영역 및 원근 보정', '1차 모바일 OCR', '시간·주소·연락처 후보 분석', '필드별 신뢰도 계산'].map(
+              (item, index) => (
+                <View key={item} style={styles.processingStep}>
+                  <View style={[styles.processingStepIcon, index < 2 && styles.processingStepIconActive]}>
+                    <Ionicons
+                      name={index < 2 ? 'checkmark' : 'ellipsis-horizontal'}
+                      size={15}
+                      color={index < 2 ? '#FFFFFF' : C.textMuted}
+                    />
+                  </View>
+                  <Text style={styles.processingStepText}>{item}</Text>
+                </View>
+              ),
+            )}
+          </View>
+        )}
+
+        {stage === 'review' && result && (
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
+            <ScrollView contentContainerStyle={styles.reviewContent} keyboardShouldPersistTaps="handled">
+              <View style={styles.ocrSummaryCard}>
+                <View>
+                  <Text style={styles.ocrSummaryLabel}>문서 전체 신뢰도</Text>
+                  <Text style={styles.ocrSummaryValue}>{result.documentConfidence}%</Text>
+                </View>
+                <View style={styles.ocrSummaryMeta}>
+                  <Text style={styles.ocrSummaryMetaText}>
+                    {result.engine === 'mlkit-demo' ? '1차 모바일 OCR' : '2차 고성능 OCR 재시도'}
+                  </Text>
+                  <Text style={styles.ocrSummaryMetaText}>
+                    {result.variantsCompared}개 전처리 비교 · {result.processingMs}ms
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.reviewGuide}>
+                <Ionicons name="information-circle-outline" size={19} color={C.primary} />
+                <Text style={styles.reviewGuideText}>
+                  노란색과 빨간색 항목을 확인하세요. 수정한 값은 다음 인식 개선 데이터로 저장할 수 있습니다.
+                </Text>
+              </View>
+              {fields.map((field) => (
+                <View
+                  key={field.key}
+                  style={[
+                    styles.ocrFieldCard,
+                    field.status === 'warning' || field.status === 'missing'
+                      ? styles.ocrFieldCardWarning
+                      : undefined,
+                  ]}
+                >
+                  <View style={styles.ocrFieldHeader}>
+                    <View style={styles.ocrFieldTitleGroup}>
+                      <View style={styles.ocrFieldIcon}>
+                        <Ionicons name={OCR_FIELD_ICONS[field.key]} size={19} color={C.primary} />
+                      </View>
+                      <View>
+                        <Text style={styles.ocrFieldLabel}>
+                          {field.label}
+                          {field.required ? ' *' : ''}
+                        </Text>
+                        <Text style={styles.ocrFieldSource} numberOfLines={1}>
+                          원문: {field.sourceText || '인식된 원문 없음'}
+                        </Text>
+                      </View>
+                    </View>
+                    <ConfidenceBadge field={field} />
+                  </View>
+                  <TextInput
+                    value={field.value}
+                    onChangeText={(value) => updateField(field.key, value)}
+                    placeholder={`${field.label} 입력`}
+                    placeholderTextColor="#9AA5B7"
+                    multiline={field.key === 'memo' || field.key === 'deliveryAddress'}
+                    style={[
+                      styles.ocrFieldInput,
+                      (field.key === 'memo' || field.key === 'deliveryAddress') && styles.ocrFieldInputMultiline,
+                    ]}
+                  />
+                  {field.alternatives.length > 1 && (
+                    <View style={styles.candidateRow}>
+                      <Text style={styles.candidateLabel}>다른 후보</Text>
+                      {field.alternatives.slice(0, 2).map((candidate) => (
+                        <Pressable
+                          key={candidate}
+                          style={styles.candidateChip}
+                          onPress={() => updateField(field.key, candidate)}
+                        >
+                          <Text style={styles.candidateChipText}>{candidate}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  )}
+                </View>
+              ))}
+              <View style={styles.privacyNotice}>
+                <Ionicons name="shield-checkmark-outline" size={20} color={C.success} />
+                <Text style={styles.privacyNoticeText}>
+                  사용자 수정 이력은 전화번호·주소를 익명화한 뒤 양식 개선 정보로만 저장합니다.
+                </Text>
+              </View>
+              <Pressable style={styles.scanPrimaryButton} onPress={register}>
+                <Ionicons name="checkmark-circle-outline" size={20} color="#FFFFFF" />
+                <Text style={styles.scanPrimaryButtonText}>검수 완료 · 배달 목록에 등록</Text>
+              </Pressable>
+              <Pressable style={styles.scanSecondaryButton} onPress={reset}>
+                <Text style={styles.scanSecondaryButtonText}>다른 인수증 촬영</Text>
+              </Pressable>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        )}
+      </SafeAreaView>
+    </Modal>
   );
 }
 
 export default function RouteloApp() {
-  const [activeTab, setActiveTab] = useState<TabKey>('deliveries');
+  const [activeTab, setActiveTab] = useState<TabKey>('home');
   const [deliveries, setDeliveries] = useState<Delivery[]>(SAMPLE_DELIVERIES);
-  const [fuelLogs, setFuelLogs] = useState<FuelLog[]>(SAMPLE_FUEL_LOGS);
-  const [mileageLogs, setMileageLogs] = useState<MileageLog[]>(SAMPLE_MILEAGE_LOGS);
-  const [settings, setSettings] = useState<FeeSettings>(DEFAULT_SETTINGS);
-  const [hydrated, setHydrated] = useState(false);
+  const [selectedDelivery, setSelectedDelivery] = useState<Delivery>();
+  const [scannerVisible, setScannerVisible] = useState(false);
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY)
       .then((value) => {
         if (!value) return;
         const parsed = JSON.parse(value);
-        if (parsed.deliveries) {
-          setDeliveries(
-            parsed.deliveries.map((delivery: Delivery) => ({
-              ...delivery,
-              productQuantity: delivery.productQuantity || 1,
-              eventTime:
-                delivery.eventTime ||
-                (delivery.productName?.includes('축하') ? '11:00' : ''),
-            })),
-          );
-        }
-        if (parsed.fuelLogs) {
-          setFuelLogs(parsed.fuelLogs.map((log: FuelLog & { distanceKm?: number }) => ({
-            ...log,
-            odometerKm: log.odometerKm || 0,
-          })));
-        }
-        if (parsed.mileageLogs) setMileageLogs(parsed.mileageLogs);
-        if (parsed.settings) {
-          setSettings({
-            ...DEFAULT_SETTINGS,
-            ...parsed.settings,
-            districtFees: {
-              ...DEFAULT_SETTINGS.districtFees,
-              ...(parsed.settings.districtFees || {}),
-            },
-          });
-        }
+        if (parsed.deliveries) setDeliveries(parsed.deliveries);
       })
-      .catch(() => undefined)
-      .finally(() => setHydrated(true));
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    if (!hydrated) return;
-    AsyncStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ deliveries, fuelLogs, mileageLogs, settings }),
-    ).catch(() => undefined);
-  }, [deliveries, fuelLogs, mileageLogs, settings, hydrated]);
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ deliveries })).catch(() => undefined);
+  }, [deliveries]);
 
-  const toggleDelivery = (id: string) => {
+  const notificationCount = 3;
+  const openNotifications = () => setActiveTab('notifications');
+  const toggleSelected = () => {
+    if (!selectedDelivery) return;
     setDeliveries((current) =>
-      current.map((delivery) =>
-        delivery.id === id
+      current.map((item) =>
+        item.id === selectedDelivery.id
           ? {
-              ...delivery,
-              status: delivery.status === 'pending' ? 'completed' : 'pending',
+              ...item,
+              status: item.status === 'completed' ? 'pending' : 'completed',
             }
-          : delivery,
+          : item,
       ),
+    );
+    setSelectedDelivery((current) =>
+      current
+        ? {
+            ...current,
+            status: current.status === 'completed' ? 'pending' : 'completed',
+          }
+        : current,
     );
   };
 
-  const registerOcr = async (form: OcrForm) => {
-    const coordinate = await geocodeAddress(form.deliveryAddress);
-    const mockDistance = 3 + ((form.deliveryAddress.length * 7) % 230) / 10;
-    const delivery: Delivery = {
-      id: `delivery-${Date.now()}`,
-      orderVendor: form.orderVendor,
-      orderVendorTel: form.orderVendorTel,
-      deliveryVendor: form.deliveryVendor,
-      deliveryVendorTel: form.deliveryVendorTel,
-      productName: form.productName,
-      productQuantity: Math.max(Number(form.productQuantity) || 1, 1),
-      eventTime: form.eventTime,
-      deliveryDt: form.deliveryDt,
-      deliveryAddress: form.deliveryAddress,
-      customerRequests: form.customerRequests,
-      recipientTel: form.recipientTel,
-      status: 'pending',
-      distanceKm: mockDistance,
-      fee: calculateFeeByAddress(form.deliveryAddress, settings),
-      ...coordinate,
-    };
-    setDeliveries((current) => [delivery, ...current]);
-    setActiveTab('deliveries');
-  };
-
-  const resetData = () => {
-    setDeliveries(SAMPLE_DELIVERIES);
-    setFuelLogs(SAMPLE_FUEL_LOGS);
-    setMileageLogs(SAMPLE_MILEAGE_LOGS);
-    setSettings(DEFAULT_SETTINGS);
-  };
-
   const screen = useMemo(() => {
-    switch (activeTab) {
-      case 'ocr':
-        return <OcrScreen onRegister={registerOcr} />;
-      case 'route':
-        return <RouteScreen deliveries={deliveries} onToggle={toggleDelivery} />;
-      case 'finance':
-        return (
-          <FinanceScreen
-            deliveries={deliveries}
-            fuelLogs={fuelLogs}
-            mileageLogs={mileageLogs}
-            settings={settings}
-            onAddFuel={(log) => setFuelLogs((current) => [...current, log])}
-            onAddMileage={(log) => setMileageLogs((current) => [...current, log])}
-            onUpdateVehicle={(vehicleModel, fuelTankCapacity) =>
-              setSettings((current) => ({ ...current, vehicleModel, fuelTankCapacity }))
-            }
-          />
-        );
-      case 'settings':
-        return (
-          <SettingsScreen
-            settings={settings}
-            onSave={setSettings}
-            onResetData={resetData}
-          />
-        );
-      default:
-        return (
-          <DeliveryListScreen
-            deliveries={deliveries}
-            onToggle={toggleDelivery}
-            onGoOcr={() => setActiveTab('ocr')}
-          />
-        );
+    if (activeTab === 'deliveries') {
+      return (
+        <DeliveryListScreen
+          deliveries={deliveries}
+          onDeliveryPress={setSelectedDelivery}
+          onNotifications={openNotifications}
+        />
+      );
     }
-  }, [activeTab, deliveries, fuelLogs, mileageLogs, settings]);
-
-  const dark = settings.themeMode === 'dark';
+    if (activeTab === 'route') {
+      return (
+        <RouteScreen
+          deliveries={deliveries}
+          onDeliveryPress={setSelectedDelivery}
+          onNotifications={openNotifications}
+        />
+      );
+    }
+    if (activeTab === 'notifications') return <NotificationsScreen />;
+    if (activeTab === 'settings') return <SettingsScreen />;
+    return (
+      <HomeScreen
+        deliveries={deliveries}
+        onDeliveryPress={setSelectedDelivery}
+        onSeeAll={() => setActiveTab('deliveries')}
+        onNotifications={openNotifications}
+      />
+    );
+  }, [activeTab, deliveries]);
 
   return (
-    <ThemeContext.Provider value={dark}>
-    <SafeAreaView style={[styles.app, dark && styles.darkApp]}>
-      <StatusBar style={dark ? 'light' : 'dark'} />
-      <AppHeader activeTab={activeTab} />
-      <View style={[styles.content, dark && styles.darkApp]}>{screen}</View>
-      <View style={[styles.bottomNav, dark && styles.darkSurface]}>
-        {tabs.map((tab) => {
-          const active = tab.key === activeTab;
-          const isScan = tab.key === 'ocr';
-          return (
-            <Pressable
-              key={tab.key}
-              testID={`nav-${tab.key}`}
-              style={styles.navItem}
-              onPress={() => setActiveTab(tab.key)}
-            >
-              <View
-                style={[
-                  styles.navIconWrap,
-                  isScan && styles.scanNavIcon,
-                  isScan && active && styles.scanNavIconActive,
-                ]}
+    <SafeAreaView style={styles.app}>
+      <StatusBar style="dark" />
+      <View style={styles.mainContent}>{screen}</View>
+      <Pressable
+        testID="open-ocr-scanner"
+        style={styles.scanFab}
+        onPress={() => setScannerVisible(true)}
+      >
+        <Ionicons name="scan-outline" size={23} color="#FFFFFF" />
+        <Text style={styles.scanFabText}>인수증 스캔</Text>
+      </Pressable>
+      <View style={styles.bottomNavBoundary}>
+        <View style={styles.bottomNav}>
+          {tabs.map((tab) => {
+            const selected = tab.key === activeTab;
+            return (
+              <Pressable
+                key={tab.key}
+                testID={`nav-${tab.key}`}
+                style={styles.navItem}
+                onPress={() => setActiveTab(tab.key)}
               >
-                <Ionicons
-                  name={(active ? tab.activeIcon : tab.icon) as never}
-                  size={22}
-                  color={active ? '#2E6BFF' : dark ? '#AAB8D0' : '#8793A5'}
-                />
-              </View>
-              <Text style={[styles.navLabel, active && styles.navLabelActive]}>
-                {tab.label}
-              </Text>
-            </Pressable>
-          );
-        })}
+                <View style={[styles.navIcon, selected && styles.navIconSelected]}>
+                  <Ionicons
+                    name={selected ? tab.activeIcon : tab.icon}
+                    size={22}
+                    color={selected ? C.primary : C.textMuted}
+                  />
+                  {tab.key === 'notifications' && notificationCount > 0 && (
+                    <View style={styles.navNotificationDot} />
+                  )}
+                </View>
+                <Text style={[styles.navLabel, selected && styles.navLabelSelected]}>
+                  {tab.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
       </View>
+      <DeliveryDetailSheet
+        delivery={selectedDelivery}
+        visible={Boolean(selectedDelivery)}
+        onClose={() => setSelectedDelivery(undefined)}
+        onToggle={toggleSelected}
+      />
+      <OcrScannerModal
+        visible={scannerVisible}
+        onClose={() => setScannerVisible(false)}
+        onRegister={(delivery) => {
+          setDeliveries((current) => [delivery, ...current]);
+          setActiveTab('deliveries');
+        }}
+      />
     </SafeAreaView>
-    </ThemeContext.Provider>
   );
 }
 
 const styles = StyleSheet.create({
-  app: { flex: 1, backgroundColor: '#F6F8FC' },
-  flexOne: { flex: 1 },
-  content: { flex: 1 },
-  screenContent: { paddingHorizontal: 18, paddingBottom: 34 },
+  app: { flex: 1, backgroundColor: C.background },
+  mainContent: { flex: 1 },
+  flex: { flex: 1 },
+  screenContent: { paddingHorizontal: 18, paddingBottom: 28 },
   header: {
-    minHeight: 76,
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'android' ? 12 : 4,
-    paddingBottom: 10,
-    backgroundColor: '#F6F8FC',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  dateText: { color: '#7A8799', fontSize: 12, fontWeight: '600', marginBottom: 3 },
-  pageTitle: { color: '#16213A', fontSize: 25, fontWeight: '800', letterSpacing: -0.6 },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 9 },
-  syncBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    borderRadius: 20,
-    backgroundColor: '#EAF7F2',
-  },
-  syncDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#10A37F' },
-  syncText: { fontSize: 11, fontWeight: '700', color: '#087F5B' },
-  profileButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#E9EFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  heroCard: {
-    borderRadius: 24,
-    padding: 22,
-    paddingBottom: 17,
-    minHeight: 210,
-    marginTop: 5,
-    overflow: 'hidden',
-  },
-  heroEyebrow: { color: '#BFD0FF', fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
-  heroTitle: {
-    color: '#FFFFFF',
-    fontSize: 24,
-    lineHeight: 32,
-    fontWeight: '800',
-    marginTop: 9,
-    letterSpacing: -0.7,
-  },
-  heroCircle: {
-    position: 'absolute',
-    right: 22,
-    top: 26,
-    width: 58,
-    height: 58,
-    borderRadius: 29,
-    backgroundColor: 'rgba(255,255,255,0.17)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  heroMetrics: {
-    marginTop: 24,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.22)',
-    paddingTop: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  heroMetric: { flex: 1 },
-  heroMetricValue: { color: '#FFFFFF', fontSize: 18, fontWeight: '800' },
-  heroMetricLabel: { color: '#C9D7FA', fontSize: 11, marginTop: 3 },
-  heroDivider: { width: 1, height: 29, backgroundColor: 'rgba(255,255,255,0.22)', marginRight: 15 },
-  quickStats: { flexDirection: 'row', gap: 10, marginTop: 12 },
-  statCard: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 15,
-    borderWidth: 1,
-    borderColor: '#EBEEF4',
-  },
-  statCardDark: { backgroundColor: '#192747' },
-  statIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-  },
-  statLabel: { color: '#7A8799', fontSize: 11, fontWeight: '600' },
-  statValue: { color: '#17213A', fontSize: 19, fontWeight: '800', marginTop: 3 },
-  textMutedOnDark: { color: '#AFC0E1' },
-  textOnDark: { color: '#FFFFFF' },
-  sectionHeading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 26,
-    marginBottom: 12,
-  },
-  sectionTitleWrap: { flexShrink: 1 },
-  sectionTitle: { color: '#17213A', fontSize: 18, fontWeight: '800', letterSpacing: -0.35 },
-  sectionCaption: { color: '#8A96A8', fontSize: 11, marginTop: 3 },
-  addMiniButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    backgroundColor: '#EDF2FF',
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 10,
-  },
-  addMiniText: { color: '#2E6BFF', fontSize: 11, fontWeight: '700' },
-  segment: {
-    flexDirection: 'row',
-    backgroundColor: '#E9EDF4',
-    borderRadius: 12,
-    padding: 4,
-    marginBottom: 12,
-  },
-  segmentButton: { flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: 9 },
-  segmentButtonActive: {
-    backgroundColor: '#FFFFFF',
-    shadowColor: '#334155',
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    elevation: 1,
-  },
-  segmentButtonText: { color: '#7B8797', fontWeight: '700', fontSize: 12 },
-  segmentButtonTextActive: { color: '#253451' },
-  deliveryCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 19,
-    padding: 17,
-    marginBottom: 11,
-    borderWidth: 1,
-    borderColor: '#E9EDF3',
-  },
-  deliveryCardCompleted: { opacity: 0.72, backgroundColor: '#F9FAFC' },
-  deliveryCardTop: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
+    paddingTop: Platform.OS === 'android' ? 18 : 8,
+    paddingBottom: 18,
   },
-  deliveryTimeWrap: { flexDirection: 'row', alignItems: 'center', gap: 11 },
-  deliveryTime: { color: '#2E6BFF', fontSize: 13, fontWeight: '800' },
-  deliveryVendor: { color: '#8995A6', fontSize: 11, marginTop: 2 },
-  statusChip: {
-    backgroundColor: '#FFF1E7',
+  headerCopy: { flex: 1, paddingRight: 12 },
+  eyebrow: {
+    color: C.primary,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.1,
+    marginBottom: 5,
+  },
+  screenTitle: { color: C.text, fontSize: 27, fontWeight: '800', letterSpacing: -0.7 },
+  screenSubtitle: { color: C.textMuted, fontSize: 12, lineHeight: 18, marginTop: 5 },
+  headerAction: {
+    width: 46,
+    height: 46,
+    borderRadius: 16,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.outline,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  notificationCounter: {
+    position: 'absolute',
+    right: -3,
+    top: -4,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
     borderRadius: 9,
-    paddingHorizontal: 9,
-    paddingVertical: 5,
+    backgroundColor: C.danger,
+    borderWidth: 2,
+    borderColor: C.background,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  statusChipCompleted: { backgroundColor: '#E8F7F1' },
-  statusChipText: { color: '#E46F20', fontSize: 10, fontWeight: '800' },
-  statusChipTextCompleted: { color: '#087F5B' },
-  productName: { color: '#17213A', fontSize: 17, fontWeight: '800', marginTop: 13, marginBottom: 9 },
-  productRow: {
+  notificationCounterText: { color: '#FFFFFF', fontSize: 9, fontWeight: '800' },
+  sectionHeader: {
+    marginTop: 24,
+    marginBottom: 11,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 10,
   },
-  quantityBadge: {
+  sectionTitle: { color: C.text, fontSize: 18, fontWeight: '800', letterSpacing: -0.3 },
+  sectionCaption: { color: C.textMuted, fontSize: 11, marginTop: 3 },
+  metricsGrid: { flexDirection: 'row', gap: 9 },
+  metricCard: {
+    flex: 1,
+    minHeight: 122,
+    padding: 14,
+    borderRadius: 20,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.outline,
+  },
+  metricIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 13,
+  },
+  metricValue: { color: C.text, fontSize: 22, fontWeight: '800' },
+  metricLabel: { color: C.textMuted, fontSize: 10, fontWeight: '600', marginTop: 3 },
+  progressCard: {
+    marginTop: 11,
+    padding: 18,
+    borderRadius: 22,
+    backgroundColor: C.navy,
+  },
+  progressTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  progressLabel: { color: '#BFCBE0', fontSize: 11, fontWeight: '600' },
+  progressValue: { color: '#FFFFFF', fontSize: 28, fontWeight: '800', marginTop: 3 },
+  progressSummary: { alignItems: 'flex-end' },
+  progressSummaryValue: { color: '#FFFFFF', fontSize: 17, fontWeight: '800' },
+  progressSummaryLabel: { color: '#9EADC7', fontSize: 9, marginTop: 2 },
+  progressTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#35445F',
+    marginTop: 15,
+    overflow: 'hidden',
+  },
+  progressFill: { height: '100%', borderRadius: 4, backgroundColor: '#7FA7FF' },
+  progressMeta: { flexDirection: 'row', gap: 18, marginTop: 13 },
+  metaItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  metaText: { color: C.textMuted, fontSize: 10, fontWeight: '600' },
+  timeAlert: {
+    minHeight: 92,
+    borderRadius: 20,
+    padding: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 9,
+    borderWidth: 1,
+  },
+  deadlineAlert: { backgroundColor: '#FFFAF5', borderColor: '#F4D7C2' },
+  eventAlert: { backgroundColor: '#FFF8F8', borderColor: '#F1CACA' },
+  timeIcon: { width: 44, height: 44, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  timeAlertLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.3 },
+  timeAlertTitleRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 4 },
+  timeAlertTime: { color: C.text, fontSize: 20, fontWeight: '900' },
+  timeAlertTitle: { flex: 1, color: C.text, fontSize: 13, fontWeight: '700' },
+  timeAlertAddress: { color: C.textMuted, fontSize: 10, marginTop: 4 },
+  textButton: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 40, paddingHorizontal: 5 },
+  textButtonLabel: { color: C.primary, fontSize: 11, fontWeight: '800' },
+  surfaceCard: {
+    borderRadius: 22,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.outline,
+    overflow: 'hidden',
+  },
+  compactDelivery: { minHeight: 104, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  sequenceMarker: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sequenceMarkerText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  compactTime: { color: C.primary, fontSize: 11, fontWeight: '800' },
+  compactTitle: { color: C.text, fontSize: 14, fontWeight: '800', marginTop: 5 },
+  compactAddress: { color: C.textMuted, fontSize: 10, marginTop: 4 },
+  inlineUrgent: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 7 },
+  inlineUrgentText: { color: C.danger, fontSize: 10, fontWeight: '800' },
+  divider: { height: 1, backgroundColor: C.outline, marginLeft: 14 },
+  badge: {
+    height: 26,
+    paddingHorizontal: 9,
+    borderRadius: 13,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    backgroundColor: '#EDF2FF',
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    borderRadius: 9,
   },
-  quantityLabel: { color: '#71809A', fontSize: 9, fontWeight: '700' },
-  quantityValue: { color: '#2E6BFF', fontSize: 12, fontWeight: '800' },
-  eventTimeRow: {
+  successBadge: { backgroundColor: C.successBg },
+  waitBadge: { backgroundColor: C.primaryContainer },
+  badgeDot: { width: 6, height: 6, borderRadius: 3 },
+  badgeText: { fontSize: 9, fontWeight: '800' },
+  filterSegment: {
+    flexDirection: 'row',
+    padding: 4,
+    borderRadius: 16,
+    backgroundColor: C.surfaceAlt,
+    marginBottom: 14,
+  },
+  filterItem: { flex: 1, minHeight: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
+  filterItemSelected: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.outline },
+  filterText: { color: C.textMuted, fontSize: 11, fontWeight: '700' },
+  filterTextSelected: { color: C.primary, fontWeight: '800' },
+  deliveryList: { gap: 11 },
+  deliveryCard: {
+    borderRadius: 22,
+    padding: 16,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.outline,
+  },
+  deliveryCardTitleGroup: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 11, paddingRight: 8 },
+  destinationIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: C.primaryContainer, alignItems: 'center', justifyContent: 'center' },
+  destinationIconUrgent: { backgroundColor: C.dangerBg },
+  destinationName: { color: C.text, fontSize: 15, fontWeight: '800' },
+  destinationVendor: { color: C.textMuted, fontSize: 10, marginTop: 3 },
+  deliveryAddress: { color: C.textMuted, fontSize: 11, marginTop: 13, lineHeight: 17 },
+  deliveryTimeGrid: { flexDirection: 'row', gap: 7, marginTop: 14 },
+  deliveryTimeCell: { flex: 1, minHeight: 60, padding: 9, borderRadius: 14, backgroundColor: C.surfaceAlt },
+  deliveryTimeCellLabel: { color: C.textMuted, fontSize: 8, fontWeight: '700' },
+  deliveryTimeCellValue: { color: C.text, fontSize: 13, fontWeight: '800', marginTop: 7 },
+  warningText: { color: C.warning },
+  dangerText: { color: C.danger },
+  deliveryCardFooter: { marginTop: 13, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.outline, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  outlinedButton: { minHeight: 40, paddingHorizontal: 13, borderRadius: 13, borderWidth: 1, borderColor: '#AFC2EB', flexDirection: 'row', alignItems: 'center', gap: 4 },
+  outlinedButtonText: { color: C.primary, fontSize: 10, fontWeight: '800' },
+  mapCard: { height: 315, borderRadius: 24, backgroundColor: '#E8EDF0', borderWidth: 1, borderColor: C.outline, overflow: 'hidden' },
+  mapRoad: { position: 'absolute', backgroundColor: '#FFFFFF', borderColor: '#D7DEE4', borderWidth: 1, borderRadius: 20 },
+  mapRoadOne: { width: '120%', height: 25, left: '-10%', top: '52%', transform: [{ rotate: '-16deg' }] },
+  mapRoadTwo: { width: 24, height: '120%', left: '54%', top: '-10%', transform: [{ rotate: '18deg' }] },
+  mapRoadThree: { width: '70%', height: 15, left: '15%', top: '26%', transform: [{ rotate: '8deg' }] },
+  mapPark: { position: 'absolute', width: 130, height: 90, borderRadius: 50, backgroundColor: '#D8E7D7', left: -30, bottom: 10 },
+  routeLineVisual: { position: 'absolute', height: 5, borderRadius: 3, backgroundColor: C.primary },
+  routeArrow: { position: 'absolute', width: 22, height: 22, borderRadius: 11, backgroundColor: C.primary, borderWidth: 2, borderColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
+  currentLocation: { position: 'absolute', width: 24, height: 24, borderRadius: 12, backgroundColor: '#BBD0FF', alignItems: 'center', justifyContent: 'center' },
+  currentLocationInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.primary, borderWidth: 2, borderColor: '#FFFFFF' },
+  mapPin: { position: 'absolute', width: 36, height: 36, borderRadius: 18, backgroundColor: C.primary, borderWidth: 3, borderColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
+  mapPinText: { color: '#FFFFFF', fontSize: 13, fontWeight: '900' },
+  mapLegend: { position: 'absolute', left: 12, bottom: 12, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(255,255,255,0.92)', paddingHorizontal: 10, paddingVertical: 7, borderRadius: 10 },
+  googleDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: C.primary },
+  mapLegendText: { color: C.text, fontSize: 9, fontWeight: '700' },
+  nextDestinationCard: { marginTop: 11, padding: 17, borderRadius: 22, backgroundColor: C.surface, borderWidth: 1, borderColor: C.outline },
+  nextDestinationHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  nextBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 10, backgroundColor: C.primaryContainer },
+  nextBadgeText: { color: C.primary, fontSize: 9, fontWeight: '800' },
+  nextEta: { color: C.textMuted, fontSize: 10, fontWeight: '600' },
+  nextTitle: { color: C.text, fontSize: 19, fontWeight: '800', marginTop: 14 },
+  nextAddress: { color: C.textMuted, fontSize: 11, marginTop: 5 },
+  nextInfoRow: { flexDirection: 'row', marginTop: 17, paddingVertical: 13, borderTopWidth: 1, borderBottomWidth: 1, borderColor: C.outline },
+  nextInfo: { flex: 1 },
+  nextInfoLabel: { color: C.textMuted, fontSize: 8, fontWeight: '700' },
+  nextInfoValue: { color: C.text, fontSize: 14, fontWeight: '800', marginTop: 5 },
+  nextInfoDivider: { width: 1, backgroundColor: C.outline, marginHorizontal: 10 },
+  priorityNotice: { marginTop: 13, padding: 11, borderRadius: 13, backgroundColor: C.dangerBg, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  priorityNoticeText: { flex: 1, color: C.danger, fontSize: 10, fontWeight: '700', lineHeight: 15 },
+  routeButtons: { flexDirection: 'row', gap: 9, marginTop: 14 },
+  primaryButton: { flex: 1, minHeight: 48, borderRadius: 15, backgroundColor: C.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingHorizontal: 12 },
+  primaryButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  secondaryButton: { flex: 1, minHeight: 48, borderRadius: 15, backgroundColor: C.primaryContainer, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingHorizontal: 12 },
+  secondaryButtonText: { color: C.primary, fontSize: 11, fontWeight: '800' },
+  notificationSummary: { minHeight: 95, borderRadius: 22, padding: 17, backgroundColor: C.navy, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  notificationSummaryLabel: { color: '#BFCBE0', fontSize: 10 },
+  notificationSummaryValue: { color: '#FFFFFF', fontSize: 25, fontWeight: '800', marginTop: 5 },
+  urgencyLegend: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 7, height: 7, borderRadius: 4, marginLeft: 6 },
+  legendText: { color: '#D2DBEB', fontSize: 9 },
+  notificationList: { gap: 9 },
+  notificationCard: { minHeight: 116, padding: 15, borderRadius: 20, backgroundColor: C.surface, borderWidth: 1, borderColor: C.outline, flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  notificationIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  notificationUrgency: { fontSize: 9, fontWeight: '900', letterSpacing: 0.4 },
+  notificationTime: { color: C.textMuted, fontSize: 9 },
+  notificationTitle: { color: C.text, fontSize: 14, fontWeight: '800', marginTop: 7 },
+  notificationBody: { color: C.textMuted, fontSize: 10, lineHeight: 16, marginTop: 5 },
+  profileCard: { minHeight: 88, padding: 15, borderRadius: 22, backgroundColor: C.navy, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  profileAvatar: { width: 50, height: 50, borderRadius: 17, backgroundColor: '#E5ECFF', alignItems: 'center', justifyContent: 'center' },
+  profileName: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
+  profileCaption: { color: '#AEBBD1', fontSize: 10, marginTop: 4 },
+  iconButton: { width: 40, height: 40, borderRadius: 14, backgroundColor: C.primaryContainer, alignItems: 'center', justifyContent: 'center' },
+  settingsGroup: { borderRadius: 22, backgroundColor: C.surface, borderWidth: 1, borderColor: C.outline, overflow: 'hidden' },
+  settingRow: { minHeight: 76, paddingHorizontal: 15, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  settingIcon: { width: 40, height: 40, borderRadius: 14, backgroundColor: C.primaryContainer, alignItems: 'center', justifyContent: 'center' },
+  settingTitle: { color: C.text, fontSize: 13, fontWeight: '800' },
+  settingCaption: { color: C.textMuted, fontSize: 9, marginTop: 4 },
+  modalBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(15,23,42,0.48)' },
+  bottomSheet: { paddingHorizontal: 20, paddingBottom: 28, borderTopLeftRadius: 28, borderTopRightRadius: 28, backgroundColor: C.surface },
+  sheetHandle: { width: 42, height: 4, borderRadius: 2, backgroundColor: C.outline, alignSelf: 'center', marginTop: 10, marginBottom: 18 },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 13 },
+  sheetEyebrow: { color: C.primary, fontSize: 9, fontWeight: '800', letterSpacing: 0.8 },
+  sheetTitle: { color: C.text, fontSize: 21, fontWeight: '800', marginTop: 4 },
+  sheetAddress: { flexDirection: 'row', gap: 8, marginTop: 17, padding: 13, borderRadius: 15, backgroundColor: C.surfaceAlt },
+  sheetAddressText: { flex: 1, color: C.text, fontSize: 12, lineHeight: 18 },
+  sheetTimeGrid: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  sheetTimeItem: { flex: 1, minHeight: 70, padding: 10, borderRadius: 14, backgroundColor: C.surfaceAlt },
+  sheetTimeLabel: { color: C.textMuted, fontSize: 8, fontWeight: '700' },
+  sheetTimeValue: { color: C.text, fontSize: 15, fontWeight: '800', marginTop: 8 },
+  sheetInfoBlock: { marginTop: 12, padding: 13, borderRadius: 15, backgroundColor: C.surfaceAlt },
+  sheetInfoLabel: { color: C.textMuted, fontSize: 9, fontWeight: '700' },
+  sheetInfoText: { color: C.text, fontSize: 11, lineHeight: 17, marginTop: 5 },
+  sheetActions: { flexDirection: 'row', gap: 9, marginTop: 16 },
+  scanFab: {
+    position: 'absolute',
+    right: 18,
+    bottom: Platform.OS === 'ios' ? 90 : 82,
+    minHeight: 54,
+    paddingHorizontal: 18,
+    borderRadius: 18,
+    backgroundColor: C.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    shadowColor: '#102A65',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.28,
+    shadowRadius: 10,
+    elevation: 12,
+    zIndex: 20,
+  },
+  scanFabText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
+  scannerApp: { flex: 1, backgroundColor: C.background },
+  scannerHeader: {
+    minHeight: 78,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: C.outline,
+    backgroundColor: C.surface,
+  },
+  scannerHeaderCopy: { flex: 1, marginHorizontal: 12 },
+  scannerEyebrow: { color: C.primary, fontSize: 8, fontWeight: '900', letterSpacing: 1 },
+  scannerTitle: { color: C.text, fontSize: 20, fontWeight: '800', marginTop: 3 },
+  scannerStep: {
+    minWidth: 40,
+    height: 30,
+    paddingHorizontal: 9,
+    borderRadius: 15,
+    backgroundColor: C.primaryContainer,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scannerStepText: { color: C.primary, fontSize: 10, fontWeight: '800' },
+  scannerContent: { padding: 18, paddingBottom: 36 },
+  captureGuide: {
+    height: 390,
+    borderRadius: 26,
+    backgroundColor: '#E8EDF5',
+    borderWidth: 1,
+    borderColor: '#C9D5E8',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  captureCorner: {
+    position: 'absolute',
+    width: 58,
+    height: 58,
+    borderColor: C.primary,
+  },
+  captureCornerTopLeft: { left: 24, top: 24, borderLeftWidth: 4, borderTopWidth: 4, borderTopLeftRadius: 12 },
+  captureCornerTopRight: { right: 24, top: 24, borderRightWidth: 4, borderTopWidth: 4, borderTopRightRadius: 12 },
+  captureCornerBottomLeft: { left: 24, bottom: 24, borderLeftWidth: 4, borderBottomWidth: 4, borderBottomLeftRadius: 12 },
+  captureCornerBottomRight: { right: 24, bottom: 24, borderRightWidth: 4, borderBottomWidth: 4, borderBottomRightRadius: 12 },
+  documentPreview: { width: '75%', alignItems: 'center' },
+  documentPreviewTitle: { color: C.text, fontSize: 15, fontWeight: '800', textAlign: 'center', marginTop: 16 },
+  documentPreviewCaption: { color: C.textMuted, fontSize: 10, lineHeight: 16, textAlign: 'center', marginTop: 7 },
+  autoCaptureBadge: {
+    position: 'absolute',
+    bottom: 42,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#FFF0F0',
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginBottom: 10,
-  },
-  eventTimeLabel: { color: '#A84444', fontSize: 10, fontWeight: '700' },
-  eventTimeValue: { color: '#E03131', fontSize: 16, fontWeight: '900' },
-  eventTimeWarning: { color: '#E03131', fontSize: 9, fontWeight: '800', marginLeft: 'auto' },
-  vendorPanel: {
-    backgroundColor: '#F7F9FC',
+    paddingHorizontal: 11,
+    paddingVertical: 7,
     borderRadius: 12,
-    paddingHorizontal: 11,
-    paddingVertical: 9,
-    marginBottom: 10,
+    backgroundColor: 'rgba(255,255,255,0.92)',
   },
-  vendorLine: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  vendorType: {
-    width: 47,
-    color: '#68768C',
-    fontSize: 9,
-    fontWeight: '800',
-    backgroundColor: '#E9EDF4',
-    paddingVertical: 4,
-    textAlign: 'center',
-    borderRadius: 6,
-  },
-  vendorName: { color: '#253149', fontSize: 11, fontWeight: '800' },
-  vendorTel: { color: '#7B8799', fontSize: 10, marginTop: 2 },
-  vendorDivider: { height: 1, backgroundColor: '#E5EAF1', marginVertical: 8 },
-  infoLine: { flexDirection: 'row', gap: 7, alignItems: 'center', marginTop: 5 },
-  infoText: { flex: 1, color: '#5F6D82', fontSize: 12, lineHeight: 18 },
-  deliveryFooter: {
-    borderTopWidth: 1,
-    borderTopColor: '#EEF1F5',
-    marginTop: 14,
-    paddingTop: 13,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  feeWrap: { flexDirection: 'row', alignItems: 'baseline', gap: 7 },
-  distanceText: { color: '#8A96A8', fontSize: 11 },
-  feeText: { color: '#17213A', fontSize: 15, fontWeight: '800' },
-  cardActions: { flexDirection: 'row', alignItems: 'center', gap: 7 },
-  iconButton: {
-    width: 35,
-    height: 35,
-    borderRadius: 10,
-    backgroundColor: '#EDF2FF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  completeButton: {
-    flexDirection: 'row',
-    gap: 5,
-    alignItems: 'center',
-    backgroundColor: '#2E6BFF',
-    borderRadius: 10,
-    paddingHorizontal: 11,
-    height: 35,
-  },
-  completeButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
-  undoButton: { backgroundColor: '#EDF2FF' },
-  undoButtonText: { color: '#2E6BFF' },
-  routeNumber: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#2E6BFF',
-  },
-  routeNumberText: { color: '#FFFFFF', fontWeight: '800', fontSize: 13 },
-  emptyState: { alignItems: 'center', paddingVertical: 45 },
-  emptyTitle: { color: '#34415A', fontSize: 15, fontWeight: '800', marginTop: 12 },
-  emptyCaption: { color: '#8A96A8', fontSize: 12, marginTop: 5, textAlign: 'center' },
-  ocrIntro: {
-    flexDirection: 'row',
-    gap: 12,
-    alignItems: 'center',
-    padding: 15,
-    backgroundColor: '#EAF0FF',
+  autoCaptureDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.success },
+  autoCaptureText: { color: C.textMuted, fontSize: 9, fontWeight: '700' },
+  captureTips: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  captureTip: {
+    flex: 1,
+    minHeight: 62,
     borderRadius: 16,
-    marginTop: 5,
-    marginBottom: 16,
-  },
-  ocrIntroIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 13,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.outline,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 5,
   },
-  ocrIntroTitle: { color: '#1E335E', fontSize: 14, fontWeight: '800' },
-  ocrIntroText: { color: '#637598', fontSize: 11, lineHeight: 17, marginTop: 3 },
-  scanner: {
-    height: 350,
-    borderRadius: 24,
-    borderWidth: 1.5,
-    borderStyle: 'dashed',
-    borderColor: '#AFC1ED',
-    backgroundColor: '#F0F4FC',
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  scanCorner: {
-    position: 'absolute',
-    width: 44,
-    height: 44,
-    borderColor: '#2E6BFF',
-  },
-  scanCornerTL: { left: 25, top: 25, borderLeftWidth: 3, borderTopWidth: 3, borderTopLeftRadius: 8 },
-  scanCornerTR: { right: 25, top: 25, borderRightWidth: 3, borderTopWidth: 3, borderTopRightRadius: 8 },
-  scanCornerBL: { left: 25, bottom: 25, borderLeftWidth: 3, borderBottomWidth: 3, borderBottomLeftRadius: 8 },
-  scanCornerBR: { right: 25, bottom: 25, borderRightWidth: 3, borderBottomWidth: 3, borderBottomRightRadius: 8 },
-  cameraCircle: {
-    width: 74,
-    height: 74,
-    borderRadius: 37,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 17,
-  },
-  scannerTitle: { color: '#2A3853', fontSize: 15, fontWeight: '800' },
-  scannerCaption: { color: '#8794A8', fontSize: 11, marginTop: 6 },
-  receiptImage: { width: '100%', height: '100%', resizeMode: 'cover' },
-  processingOverlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(26,42,72,0.77)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-  },
-  processingText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
-  primaryButton: {
-    minHeight: 52,
-    borderRadius: 15,
-    backgroundColor: '#2E6BFF',
+  captureTipText: { color: C.textMuted, fontSize: 9, fontWeight: '700' },
+  scanPrimaryButton: {
+    minHeight: 54,
+    borderRadius: 17,
+    backgroundColor: C.primary,
     flexDirection: 'row',
-    gap: 8,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
     marginTop: 15,
   },
-  primaryButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
-  secondaryButton: {
-    minHeight: 50,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: '#C9D4EB',
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 9,
-    backgroundColor: '#FFFFFF',
-  },
-  secondaryButtonText: { color: '#2E6BFF', fontSize: 14, fontWeight: '800' },
-  tipCard: {
-    marginTop: 18,
-    padding: 14,
-    borderRadius: 14,
-    backgroundColor: '#FFF6ED',
-    flexDirection: 'row',
-    gap: 10,
-  },
-  tipTitle: { color: '#9A541E', fontSize: 12, fontWeight: '800' },
-  tipText: { color: '#A66C40', fontSize: 11, lineHeight: 16, marginTop: 3 },
-  reviewStatus: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 11,
-    borderRadius: 16,
-    backgroundColor: '#E9F7F2',
-    padding: 14,
-    marginTop: 5,
-  },
-  reviewCheck: {
-    width: 35,
-    height: 35,
-    borderRadius: 18,
-    backgroundColor: '#10A37F',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  reviewTitle: { color: '#176B56', fontSize: 13, fontWeight: '800' },
-  reviewCaption: { color: '#5D887D', fontSize: 10, marginTop: 3 },
-  retakeText: { color: '#2E6BFF', fontSize: 11, fontWeight: '800' },
-  formCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#E9EDF3',
-  },
-  twoColumns: { flexDirection: 'row', gap: 10 },
-  halfInput: { flex: 1 },
-  quantityInputColumn: { width: 105 },
-  inputGroup: { marginBottom: 13 },
-  inputLabel: { color: '#556278', fontSize: 11, fontWeight: '700', marginBottom: 6 },
-  textInput: {
-    minHeight: 44,
-    borderWidth: 1,
-    borderColor: '#DCE2EC',
-    backgroundColor: '#FAFBFD',
-    borderRadius: 11,
-    paddingHorizontal: 12,
-    color: '#1D2941',
-    fontSize: 13,
-  },
-  multilineInput: { minHeight: 80, paddingTop: 12, textAlignVertical: 'top' },
-  mapCard: {
-    height: 330,
-    borderRadius: 23,
-    overflow: 'hidden',
-    marginTop: 5,
-    borderWidth: 1,
-    borderColor: '#E1E6EE',
-    backgroundColor: '#E8ECE5',
-  },
-  mapBackground: { flex: 1, backgroundColor: '#E9EDE5', overflow: 'hidden' },
-  road: {
-    position: 'absolute',
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#DCE2D8',
-    borderRadius: 20,
-  },
-  roadOne: { width: '130%', height: 26, left: '-15%', top: '44%', transform: [{ rotate: '-18deg' }] },
-  roadTwo: { width: 25, height: '130%', left: '47%', top: '-15%', transform: [{ rotate: '12deg' }] },
-  roadThree: { width: '90%', height: 15, left: '8%', top: '23%', transform: [{ rotate: '7deg' }] },
-  roadFour: { width: 13, height: '90%', left: '72%', top: '11%', transform: [{ rotate: '-29deg' }] },
-  parkShape: {
-    position: 'absolute',
-    width: 120,
-    height: 75,
-    borderRadius: 40,
-    backgroundColor: '#D6E7D0',
-    left: -20,
-    bottom: 20,
-    transform: [{ rotate: '-20deg' }],
-  },
-  riverShape: {
-    position: 'absolute',
-    width: 50,
-    height: 430,
-    backgroundColor: '#CFE6EF',
-    right: -2,
-    top: -35,
-    transform: [{ rotate: '17deg' }],
-  },
-  currentMarker: {
-    position: 'absolute',
-    left: '44%',
-    bottom: '16%',
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: 'rgba(46,107,255,0.23)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  currentMarkerInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#2E6BFF', borderWidth: 2, borderColor: '#FFFFFF' },
-  mapMarkerWrap: { position: 'absolute', alignItems: 'center' },
-  mapRouteLine: {
-    position: 'absolute',
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#2E6BFF',
-    shadowColor: '#163D9A',
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 3,
-  },
-  mapRouteArrow: {
-    position: 'absolute',
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: '#2E6BFF',
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 4,
-  },
-  mapSegmentBadge: {
-    position: 'absolute',
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#B8C9F4',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 3,
-  },
-  mapSegmentBadgeText: { color: '#2E6BFF', fontSize: 8, fontWeight: '900' },
-  mapMarker: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#2E6BFF',
-    borderWidth: 3,
-    borderColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#1C376F',
-    shadowOpacity: 0.25,
-    shadowRadius: 5,
-    elevation: 4,
-  },
-  mapMarkerText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
-  mapMarkerTail: {
-    width: 0,
-    height: 0,
-    borderLeftWidth: 5,
-    borderRightWidth: 5,
-    borderTopWidth: 7,
-    borderLeftColor: 'transparent',
-    borderRightColor: 'transparent',
-    borderTopColor: '#2E6BFF',
-    marginTop: -2,
-  },
-  mapBrand: {
-    position: 'absolute',
-    left: 10,
-    bottom: 9,
-    backgroundColor: 'rgba(255,255,255,0.85)',
-    borderRadius: 5,
-    paddingHorizontal: 7,
-    paddingVertical: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  mapBrandText: { color: '#566274', fontSize: 8, fontWeight: '800', letterSpacing: 0.5 },
-  myLocationButton: {
-    position: 'absolute',
-    right: 12,
-    bottom: 12,
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#334155',
-    shadowOpacity: 0.15,
-    shadowRadius: 5,
-    elevation: 3,
-  },
-  routeSummary: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 16,
-    marginTop: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderWidth: 1,
-    borderColor: '#E9EDF3',
-  },
-  optimizedRow: { flexDirection: 'row', marginBottom: 7 },
-  optimizedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 7,
-    paddingVertical: 4,
-    borderRadius: 7,
-    backgroundColor: '#E7F7F1',
-  },
-  optimizedText: { color: '#087F5B', fontSize: 9, fontWeight: '800' },
-  routeSummaryTitle: { color: '#17213A', fontSize: 15, fontWeight: '800' },
-  routeSummaryCaption: { color: '#7D899B', fontSize: 11, marginTop: 4 },
-  optimizeButton: {
-    flexDirection: 'row',
-    gap: 5,
-    alignItems: 'center',
-    borderRadius: 11,
-    backgroundColor: '#2E6BFF',
-    paddingHorizontal: 11,
-    height: 39,
-  },
-  optimizeButtonText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
-  googleMapsButton: {
-    minHeight: 58,
-    borderRadius: 16,
-    backgroundColor: '#1A73E8',
-    marginTop: 10,
-    paddingHorizontal: 15,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  googleMapsButtonTitle: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
-  googleMapsButtonCaption: { color: '#D7E7FF', fontSize: 9, marginTop: 3 },
-  routeLine: { position: 'relative' },
-  routeItemWrap: { position: 'relative' },
-  routeConnector: {
-    position: 'absolute',
-    left: 31,
-    top: 37,
-    width: 2,
-    height: '100%',
-    backgroundColor: '#C8D6F7',
-    zIndex: 2,
-  },
-  periodSelector: {
-    flexDirection: 'row',
-    backgroundColor: '#E9EDF4',
-    borderRadius: 13,
-    padding: 4,
-    marginTop: 5,
-    marginBottom: 13,
-  },
-  periodButton: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 10 },
-  periodButtonActive: { backgroundColor: '#FFFFFF' },
-  periodButtonText: { color: '#7D899B', fontSize: 11, fontWeight: '700' },
-  periodButtonTextActive: { color: '#26334D', fontWeight: '800' },
-  profitCard: { borderRadius: 23, padding: 21, overflow: 'hidden' },
-  vehicleSummaryCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 15,
-    marginBottom: 13,
-    borderWidth: 1,
-    borderColor: '#E9EDF3',
-  },
-  vehicleSummaryTop: { flexDirection: 'row', alignItems: 'center', gap: 11 },
-  vehicleEditButton: {
-    backgroundColor: '#EDF2FF',
-    borderRadius: 9,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-  },
-  vehicleEditText: { color: '#2E6BFF', fontSize: 10, fontWeight: '800' },
-  profitLabel: { color: '#AFC0E1', fontSize: 12, fontWeight: '600' },
-  profitValue: { color: '#FFFFFF', fontSize: 30, fontWeight: '800', marginTop: 7, letterSpacing: -0.8 },
-  profitChange: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 5 },
-  profitChangeText: { color: '#6EE7B7', fontSize: 11, fontWeight: '700' },
-  profitBreakdown: {
-    flexDirection: 'row',
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.15)',
-    paddingTop: 15,
-    marginTop: 20,
-  },
-  breakdownLabel: { color: '#94A7CB', fontSize: 10 },
-  breakdownValue: { color: '#FFFFFF', fontSize: 15, fontWeight: '700', marginTop: 4 },
-  breakdownDivider: { width: 1, backgroundColor: 'rgba(255,255,255,0.15)', marginHorizontal: 30 },
-  chartCard: {
-    marginTop: 13,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 17,
-    borderWidth: 1,
-    borderColor: '#E9EDF3',
-  },
-  financeActions: { flexDirection: 'row', gap: 10, marginTop: 13 },
-  mileageAction: {
-    flex: 1,
-    minHeight: 76,
-    borderRadius: 16,
-    backgroundColor: '#EDF2FF',
-    padding: 13,
-    gap: 8,
-  },
-  fuelAction: {
-    flex: 1,
-    minHeight: 76,
-    borderRadius: 16,
-    backgroundColor: '#FFF1E7',
-    padding: 13,
-    gap: 8,
-  },
-  financeActionTitle: { color: '#26334D', fontSize: 12, fontWeight: '800' },
-  financeActionCaption: { color: '#7D899B', fontSize: 9, marginTop: 2 },
-  chartLegend: { flexDirection: 'row', justifyContent: 'flex-end', gap: 14, marginTop: -5 },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  legendDot: { width: 7, height: 7, borderRadius: 4 },
-  legendText: { color: '#7D899B', fontSize: 9 },
-  chart: { height: 160, flexDirection: 'row', alignItems: 'flex-end', gap: 20, paddingTop: 20 },
-  chartColumn: { flex: 1, alignItems: 'center', height: '100%' },
-  bars: { flex: 1, flexDirection: 'row', alignItems: 'flex-end', gap: 5 },
-  bar: { width: 12, minHeight: 5, borderTopLeftRadius: 5, borderTopRightRadius: 5 },
-  chartLabel: { color: '#8995A6', fontSize: 9, marginTop: 7 },
-  logCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    paddingHorizontal: 15,
-    borderWidth: 1,
-    borderColor: '#E9EDF3',
-  },
-  logRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 14 },
-  logRowBorder: { borderBottomWidth: 1, borderBottomColor: '#EEF1F5' },
-  fuelIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-    backgroundColor: '#FFF1E7',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logTitle: { color: '#26334D', fontSize: 12, fontWeight: '800' },
-  logCaption: { color: '#8995A6', fontSize: 9, marginTop: 3 },
-  logAmount: { color: '#E46F20', fontSize: 12, fontWeight: '800' },
-  mileageAmount: { color: '#2E6BFF', fontSize: 13, fontWeight: '800' },
-  modalBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(15,23,42,0.45)' },
-  modalSheet: {
-    backgroundColor: '#F8F9FC',
-    paddingHorizontal: 20,
-    paddingBottom: 28,
-    borderTopLeftRadius: 26,
-    borderTopRightRadius: 26,
-  },
-  modalHandle: { width: 38, height: 4, borderRadius: 2, backgroundColor: '#CCD3DE', alignSelf: 'center', marginTop: 10 },
-  calculatedAmount: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#EAF0FF',
-    padding: 14,
-    borderRadius: 12,
-  },
-  calculatedLabel: { color: '#637598', fontSize: 11, fontWeight: '700' },
-  calculatedValue: { color: '#2E6BFF', fontSize: 16, fontWeight: '800' },
-  tankGauge: {
-    height: 9,
-    borderRadius: 5,
-    backgroundColor: '#E3E8F0',
-    overflow: 'hidden',
-    marginTop: 13,
-  },
-  tankGaugeFill: { height: '100%', borderRadius: 5, backgroundColor: '#2E6BFF' },
-  tankGaugeText: { color: '#7D899B', fontSize: 10, textAlign: 'right', marginTop: 5 },
-  settingsIntro: {
-    marginTop: 5,
-    backgroundColor: '#EAF0FF',
+  scanPrimaryButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
+  scanSecondaryButton: {
+    minHeight: 52,
     borderRadius: 17,
-    padding: 15,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: '#AFC2EB',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-  },
-  settingsIntroIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 13,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
+    marginTop: 9,
   },
-  settingsIntroTitle: { color: '#1F3766', fontSize: 13, fontWeight: '800' },
-  settingsIntroText: { color: '#64769A', fontSize: 10, lineHeight: 15, marginTop: 3 },
-  settingsCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 17,
-    borderWidth: 1,
-    borderColor: '#E9EDF3',
-    marginTop: 13,
-  },
-  themeSelector: { flexDirection: 'row', gap: 9 },
-  themeOption: {
-    flex: 1,
-    minHeight: 54,
-    borderRadius: 13,
-    borderWidth: 1,
-    borderColor: '#DDE3EC',
-    backgroundColor: '#F8FAFD',
+  scanSecondaryButtonText: { color: C.primary, fontSize: 11, fontWeight: '800' },
+  demoReceiptButton: {
+    minHeight: 45,
+    marginTop: 9,
+    borderRadius: 15,
+    backgroundColor: C.surfaceAlt,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 7,
   },
-  themeOptionSelected: { borderColor: '#2E6BFF', backgroundColor: '#EDF2FF' },
-  themeOptionText: { color: '#68768C', fontSize: 11, fontWeight: '700' },
-  themeOptionTextSelected: { color: '#2E6BFF', fontWeight: '800' },
-  settingInputRow: {
+  demoReceiptText: { color: C.textMuted, fontSize: 10, fontWeight: '700' },
+  qualityPreview: {
+    height: 285,
+    borderRadius: 24,
+    backgroundColor: '#DCE3EC',
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  qualityImage: { width: '100%', height: '100%', resizeMode: 'cover' },
+  qualityDemoImage: { alignItems: 'center', justifyContent: 'center' },
+  qualityDemoText: { color: C.textMuted, fontSize: 11, fontWeight: '700', marginTop: 10 },
+  documentBoundary: {
+    position: 'absolute',
+    left: 34,
+    right: 34,
+    top: 22,
+    bottom: 22,
+    borderRadius: 12,
+    borderWidth: 3,
+    borderColor: '#73A0FF',
+  },
+  qualityScoreCircle: {
+    position: 'absolute',
+    right: 14,
+    top: 14,
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderWidth: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  qualityScore: { fontSize: 18, fontWeight: '900' },
+  qualityScoreLabel: { color: C.textMuted, fontSize: 7, fontWeight: '700' },
+  qualityCard: {
+    padding: 16,
+    borderRadius: 22,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.outline,
+    marginTop: 12,
+  },
+  qualityCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  qualityCardTitle: { color: C.text, fontSize: 15, fontWeight: '800' },
+  qualityRow: { minHeight: 37, flexDirection: 'row', alignItems: 'center', gap: 9 },
+  qualityLabelGroup: { width: 78, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  qualityLabel: { color: C.textMuted, fontSize: 9, fontWeight: '700' },
+  qualityTrack: { flex: 1, height: 7, borderRadius: 4, backgroundColor: C.surfaceAlt, overflow: 'hidden' },
+  qualityFill: { height: '100%', borderRadius: 4 },
+  qualityValue: { width: 25, textAlign: 'right', fontSize: 9, fontWeight: '800' },
+  qualityWarning: {
+    padding: 12,
+    marginTop: 9,
+    borderRadius: 14,
+    backgroundColor: C.warningBg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  qualityWarningText: { flex: 1, color: C.warning, fontSize: 10, fontWeight: '700' },
+  variantInfo: {
+    padding: 13,
+    marginTop: 10,
+    borderRadius: 15,
+    backgroundColor: C.primaryContainer,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+  },
+  variantInfoText: { flex: 1, color: C.onPrimaryContainer, fontSize: 10, lineHeight: 15, fontWeight: '600' },
+  scanActionRow: { flexDirection: 'row', gap: 9, marginTop: 14 },
+  scanSecondaryFlex: {
+    flex: 0.8,
+    minHeight: 52,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: '#AFC2EB',
+    backgroundColor: C.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scanPrimaryFlex: {
+    flex: 1.2,
+    minHeight: 52,
+    borderRadius: 17,
+    backgroundColor: C.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+  },
+  processingScreen: { flex: 1, paddingHorizontal: 35, alignItems: 'center', justifyContent: 'center' },
+  processingIcon: {
+    width: 92,
+    height: 92,
+    borderRadius: 30,
+    backgroundColor: C.primaryContainer,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  processingTitle: { color: C.text, fontSize: 19, fontWeight: '800', textAlign: 'center', marginTop: 24 },
+  processingCaption: { color: C.textMuted, fontSize: 11, lineHeight: 18, textAlign: 'center', marginTop: 8, marginBottom: 25 },
+  processingStep: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 11, marginTop: 11 },
+  processingStepIcon: { width: 28, height: 28, borderRadius: 10, backgroundColor: C.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
+  processingStepIconActive: { backgroundColor: C.success },
+  processingStepText: { color: C.text, fontSize: 11, fontWeight: '700' },
+  reviewContent: { padding: 18, paddingBottom: 38 },
+  ocrSummaryCard: {
+    minHeight: 105,
+    padding: 17,
+    borderRadius: 22,
+    backgroundColor: C.navy,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 9,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F2F6',
   },
-  settingInputLabel: { color: '#536076', fontSize: 12, fontWeight: '600' },
-  numberInputWrap: {
+  ocrSummaryLabel: { color: '#BFCBE0', fontSize: 10, fontWeight: '600' },
+  ocrSummaryValue: { color: '#FFFFFF', fontSize: 29, fontWeight: '900', marginTop: 5 },
+  ocrSummaryMeta: { alignItems: 'flex-end', gap: 5 },
+  ocrSummaryMetaText: { color: '#C7D3E8', fontSize: 9 },
+  reviewGuide: {
+    marginTop: 10,
+    padding: 12,
+    borderRadius: 15,
+    backgroundColor: C.primaryContainer,
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  reviewGuideText: { flex: 1, color: C.onPrimaryContainer, fontSize: 10, lineHeight: 16 },
+  ocrFieldCard: {
+    marginTop: 10,
+    padding: 14,
+    borderRadius: 19,
+    backgroundColor: C.surface,
     borderWidth: 1,
-    borderColor: '#DCE2EC',
-    borderRadius: 10,
-    height: 39,
-    paddingRight: 10,
-    backgroundColor: '#FAFBFD',
+    borderColor: C.outline,
   },
-  numberInput: { width: 88, height: 39, textAlign: 'right', paddingHorizontal: 10, color: '#1D2941', fontSize: 13, fontWeight: '700' },
-  numberUnit: { color: '#8995A6', fontSize: 10 },
-  feeExample: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    borderRadius: 10,
-    backgroundColor: '#EEF3FF',
-    padding: 11,
+  ocrFieldCardWarning: { borderColor: '#E8B5B5', backgroundColor: '#FFFBFB' },
+  ocrFieldHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  ocrFieldTitleGroup: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 9 },
+  ocrFieldIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: C.primaryContainer, alignItems: 'center', justifyContent: 'center' },
+  ocrFieldLabel: { color: C.text, fontSize: 11, fontWeight: '800' },
+  ocrFieldSource: { maxWidth: 205, color: C.textMuted, fontSize: 8, marginTop: 3 },
+  confidenceBadge: { height: 27, paddingHorizontal: 8, borderRadius: 10, flexDirection: 'row', alignItems: 'center', gap: 4 },
+  confidenceText: { fontSize: 9, fontWeight: '900' },
+  ocrFieldInput: {
+    minHeight: 45,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: C.outline,
+    backgroundColor: C.background,
+    color: C.text,
+    fontSize: 12,
+    fontWeight: '600',
+    paddingHorizontal: 12,
+    marginTop: 11,
+  },
+  ocrFieldInputMultiline: { minHeight: 70, paddingTop: 11, textAlignVertical: 'top' },
+  candidateRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  candidateLabel: { color: C.textMuted, fontSize: 8, fontWeight: '700' },
+  candidateChip: { paddingHorizontal: 8, paddingVertical: 5, borderRadius: 9, backgroundColor: C.surfaceAlt },
+  candidateChipText: { color: C.primary, fontSize: 8, fontWeight: '700' },
+  privacyNotice: {
     marginTop: 12,
-  },
-  feeExampleText: { color: '#5570A6', fontSize: 10, flex: 1 },
-  vehicleRow: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 9 },
-  vehicleIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: '#EDF2FF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  vehicleName: { color: '#26334D', fontSize: 13, fontWeight: '800' },
-  vehicleCaption: { color: '#8995A6', fontSize: 10, marginTop: 3 },
-  integrationRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 5 },
-  integrationIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  integrationTitle: { color: '#26334D', fontSize: 12, fontWeight: '800' },
-  integrationCaption: { color: '#8995A6', fontSize: 9, marginTop: 3 },
-  integrationDivider: { height: 1, backgroundColor: '#EEF1F5', marginVertical: 10 },
-  readyBadge: { backgroundColor: '#FFF6D8', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5 },
-  readyText: { color: '#A06A00', fontSize: 9, fontWeight: '800' },
-  demoBadge: { backgroundColor: '#E8F7F1', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5 },
-  demoText: { color: '#087F5B', fontSize: 9, fontWeight: '800' },
-  resetButton: { alignItems: 'center', paddingVertical: 15 },
-  resetButtonText: { color: '#D24F4F', fontSize: 12, fontWeight: '700' },
-  versionText: { textAlign: 'center', color: '#A0AABA', fontSize: 9, marginBottom: 5 },
-  bottomNav: {
-    minHeight: 72,
-    paddingTop: 7,
-    paddingBottom: Platform.OS === 'ios' ? 3 : 7,
-    backgroundColor: '#FFFFFF',
-    borderTopWidth: 1,
-    borderTopColor: '#E7EBF1',
+    padding: 13,
+    borderRadius: 15,
+    backgroundColor: C.successBg,
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
   },
-  navItem: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  navIconWrap: { height: 31, alignItems: 'center', justifyContent: 'center' },
-  scanNavIcon: {
-    width: 31,
-    height: 31,
-    backgroundColor: 'transparent',
-    marginTop: 0,
+  privacyNoticeText: { flex: 1, color: C.success, fontSize: 9, lineHeight: 14, fontWeight: '600' },
+  bottomNavBoundary: {
+    backgroundColor: C.surface,
+    borderTopWidth: 1,
+    borderTopColor: '#CFD7E3',
+    shadowColor: '#172033',
+    shadowOffset: { width: 0, height: -5 },
+    shadowOpacity: 0.09,
+    shadowRadius: 12,
+    elevation: 14,
+    paddingTop: 6,
   },
-  scanNavIconActive: { backgroundColor: 'transparent' },
-  navLabel: { color: '#8793A5', fontSize: 9, fontWeight: '600', marginTop: 2 },
-  navLabelActive: { color: '#2E6BFF', fontWeight: '800' },
-  darkApp: { backgroundColor: '#0F1726' },
-  darkSurface: { backgroundColor: '#151F31', borderColor: '#26344B' },
-  darkCard: { backgroundColor: '#182337', borderColor: '#293850' },
-  darkInset: { backgroundColor: '#111B2C', borderColor: '#31405A' },
-  darkBlueInset: { backgroundColor: '#1A2C4E' },
-  darkInput: { backgroundColor: '#111B2C', borderColor: '#33425B', color: '#EEF4FF' },
-  darkText: { color: '#F1F5FC' },
-  darkMutedText: { color: '#AAB8D0' },
+  bottomNav: { minHeight: Platform.OS === 'ios' ? 78 : 70, flexDirection: 'row', paddingBottom: Platform.OS === 'ios' ? 6 : 4 },
+  navItem: { flex: 1, minHeight: 62, alignItems: 'center', justifyContent: 'center' },
+  navIcon: { width: 50, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  navIconSelected: { backgroundColor: C.primaryContainer },
+  navLabel: { color: C.textMuted, fontSize: 9, fontWeight: '600', marginTop: 3 },
+  navLabelSelected: { color: C.primary, fontWeight: '800' },
+  navNotificationDot: { position: 'absolute', right: 9, top: 5, width: 7, height: 7, borderRadius: 4, backgroundColor: C.danger, borderWidth: 1, borderColor: C.surface },
 });

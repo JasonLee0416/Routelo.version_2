@@ -57,3 +57,46 @@ export type OcrForm = {
   customerRequests: string;
   recipientTel: string;
 };
+
+export type OcrFieldKey =
+  | 'deliveryDate'
+  | 'strictTime'
+  | 'eventTime'
+  | 'venueName'
+  | 'deliveryAddress'
+  | 'recipientName'
+  | 'recipientTel'
+  | 'orderNumber'
+  | 'memo';
+
+export type OcrFieldResult = {
+  key: OcrFieldKey;
+  label: string;
+  value: string;
+  confidence: number;
+  required: boolean;
+  sourceText: string;
+  alternatives: string[];
+  status: 'confirmed' | 'review' | 'warning' | 'missing';
+};
+
+export type CaptureQuality = {
+  score: number;
+  blur: number;
+  brightness: number;
+  documentCoverage: number;
+  skew: number;
+  shadow: number;
+  passed: boolean;
+  messages: string[];
+};
+
+export type OcrPipelineResult = {
+  engine: 'mlkit-demo' | 'cloud-fallback-demo';
+  rawText: string;
+  fields: OcrFieldResult[];
+  documentConfidence: number;
+  quality: CaptureQuality;
+  processingMs: number;
+  variantsCompared: number;
+};
