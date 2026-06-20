@@ -52,7 +52,7 @@ export function calculateFeeByAddress(address: string, settings: FeeSettings) {
 }
 
 export async function geocodeAddress(address: string) {
-  // 실제 배포 시 EXPO_PUBLIC_KAKAO_REST_API_KEY를 사용해 Kakao Local API를 호출합니다.
+  // Google Maps 길찾기 링크는 API 키 없이 사용할 수 있습니다.
   // MVP에서는 주소 등록 흐름을 끊지 않도록 서울 중심부의 안정적인 대체 좌표를 반환합니다.
   const seed = [...address].reduce((sum, char) => sum + char.charCodeAt(0), 0);
   return {

@@ -8,6 +8,7 @@ import {
   Alert,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -29,7 +30,7 @@ import {
   SEOUL_DISTRICTS,
 } from './data';
 import { Delivery, FeeSettings, FuelLog, MileageLog, OcrForm } from './models';
-import { calculateFeeByAddress, geocodeAddress, optimizeByNearestNeighbor } from './services/kakao';
+import { calculateFeeByAddress, geocodeAddress, optimizeByNearestNeighbor } from './services/maps';
 
 type TabKey = 'deliveries' | 'ocr' | 'route' | 'finance' | 'settings';
 type DeliveryFilter = 'all' | 'pending' | 'completed';
@@ -668,6 +669,7 @@ function RouteScreen({
   const pending = deliveries.filter((delivery) => delivery.status === 'pending');
   const [route, setRoute] = useState(() => optimizeByNearestNeighbor(pending));
   const [optimized, setOptimized] = useState(true);
+  const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
     setRoute(optimizeByNearestNeighbor(pending));
@@ -680,11 +682,66 @@ function RouteScreen({
     minLon: Math.min(...route.map((item) => item.longitude), 127.0),
     maxLon: Math.max(...route.map((item) => item.longitude), 127.11),
   };
+  const startCoordinate = { latitude: 37.5033, longitude: 127.0442 };
+  const deliveryMapPoints = route.map((delivery) => ({
+    x:
+      mapSize.width *
+      (0.08 +
+        ((delivery.longitude - bounds.minLon) /
+          Math.max(bounds.maxLon - bounds.minLon, 0.001)) *
+          0.77),
+    y:
+      mapSize.height *
+      (0.12 +
+        (1 -
+          (delivery.latitude - bounds.minLat) /
+            Math.max(bounds.maxLat - bounds.minLat, 0.001)) *
+          0.65),
+  }));
+  const routeMapPoints = [
+    { x: mapSize.width * 0.44 + 11, y: mapSize.height * 0.84 + 11 },
+    ...deliveryMapPoints,
+  ];
+  const routeSegments = routeMapPoints.slice(0, -1).map((point, index) => {
+    const next = routeMapPoints[index + 1];
+    const dx = next.x - point.x;
+    const dy = next.y - point.y;
+    const length = Math.sqrt(dx * dx + dy * dy);
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    return {
+      key: `${index}-${index + 1}`,
+      left: (point.x + next.x - length) / 2,
+      top: (point.y + next.y) / 2,
+      length,
+      angle,
+      arrowX: point.x + dx * 0.68,
+      arrowY: point.y + dy * 0.68,
+    };
+  });
 
   const optimize = () => {
     setRoute(optimizeByNearestNeighbor(pending));
     setOptimized(true);
     Alert.alert('동선 최적화 완료', '현재 위치에서 가까운 순서로 경유지를 재정렬했습니다.');
+  };
+
+  const openGoogleMaps = async () => {
+    if (!route.length) {
+      Alert.alert('배달지 없음', 'Google 지도에서 안내할 대기 중인 배달지가 없습니다.');
+      return;
+    }
+    const destination = route[route.length - 1].deliveryAddress;
+    const waypoints = route
+      .slice(0, -1)
+      .map((delivery) => delivery.deliveryAddress)
+      .join('|');
+    const url =
+      'https://www.google.com/maps/dir/?api=1' +
+      `&origin=${startCoordinate.latitude},${startCoordinate.longitude}` +
+      `&destination=${encodeURIComponent(destination)}` +
+      (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') +
+      '&travelmode=driving';
+    await Linking.openURL(url);
   };
 
   return (
@@ -693,7 +750,15 @@ function RouteScreen({
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.mapCard}>
-        <View style={styles.mapBackground}>
+        <View
+          style={styles.mapBackground}
+          onLayout={(event) =>
+            setMapSize({
+              width: event.nativeEvent.layout.width,
+              height: event.nativeEvent.layout.height,
+            })
+          }
+        >
           <View style={[styles.road, styles.roadOne]} />
           <View style={[styles.road, styles.roadTwo]} />
           <View style={[styles.road, styles.roadThree]} />
@@ -704,22 +769,54 @@ function RouteScreen({
             <View style={styles.currentMarkerInner} />
           </View>
 
+          {routeSegments.map((segment, index) => (
+            <View key={segment.key}>
+              <View
+                style={[
+                  styles.mapRouteLine,
+                  {
+                    left: segment.left,
+                    top: segment.top,
+                    width: segment.length,
+                    transform: [{ rotate: `${segment.angle}deg` }],
+                  },
+                ]}
+              />
+              <View
+                style={[
+                  styles.mapRouteArrow,
+                  {
+                    left: segment.arrowX - 11,
+                    top: segment.arrowY - 11,
+                    transform: [{ rotate: `${segment.angle}deg` }],
+                  },
+                ]}
+              >
+                <Ionicons name="arrow-forward" size={15} color="#FFFFFF" />
+              </View>
+              <View
+                style={[
+                  styles.mapSegmentBadge,
+                  {
+                    left: (routeMapPoints[index].x + routeMapPoints[index + 1].x) / 2 - 9,
+                    top: (routeMapPoints[index].y + routeMapPoints[index + 1].y) / 2 - 20,
+                  },
+                ]}
+              >
+                <Text style={styles.mapSegmentBadgeText}>{index + 1}</Text>
+              </View>
+            </View>
+          ))}
+
           {route.map((delivery, index) => {
-            const left =
-              8 +
-              ((delivery.longitude - bounds.minLon) /
-                Math.max(bounds.maxLon - bounds.minLon, 0.001)) *
-                77;
-            const top =
-              12 +
-              (1 -
-                (delivery.latitude - bounds.minLat) /
-                  Math.max(bounds.maxLat - bounds.minLat, 0.001)) *
-                65;
+            const point = deliveryMapPoints[index];
             return (
               <View
                 key={delivery.id}
-                style={[styles.mapMarkerWrap, { left: `${left}%`, top: `${top}%` }]}
+                style={[
+                  styles.mapMarkerWrap,
+                  { left: (point?.x ?? 0) - 16, top: (point?.y ?? 0) - 16 },
+                ]}
               >
                 <View style={styles.mapMarker}>
                   <Text style={styles.mapMarkerText}>{index + 1}</Text>
@@ -730,7 +827,8 @@ function RouteScreen({
           })}
 
           <View style={styles.mapBrand}>
-            <Text style={styles.mapBrandText}>KAKAO MAP READY</Text>
+            <Ionicons name="logo-google" size={12} color="#4285F4" />
+            <Text style={styles.mapBrandText}>GOOGLE MAPS ROUTE</Text>
           </View>
         </View>
         <Pressable style={styles.myLocationButton}>
@@ -756,6 +854,17 @@ function RouteScreen({
           <Text style={styles.optimizeButtonText}>다시 최적화</Text>
         </Pressable>
       </View>
+
+      <Pressable style={styles.googleMapsButton} onPress={openGoogleMaps}>
+        <Ionicons name="navigate-circle-outline" size={21} color="#FFFFFF" />
+        <View style={styles.flexOne}>
+          <Text style={styles.googleMapsButtonTitle}>Google 지도에서 동선 열기</Text>
+          <Text style={styles.googleMapsButtonCaption}>
+            현재 위치부터 {route.length}개 배달지를 방문 순서대로 안내
+          </Text>
+        </View>
+        <Ionicons name="open-outline" size={18} color="#FFFFFF" />
+      </Pressable>
 
       <SectionTitle title="추천 방문 순서" caption="현재 위치 기준" />
       <View style={styles.routeLine}>
@@ -1312,11 +1421,11 @@ function SettingsScreen({
             <Ionicons name="map" size={20} color="#2A2A2A" />
           </View>
           <View style={styles.flexOne}>
-            <Text style={styles.integrationTitle}>카카오맵 API</Text>
-            <Text style={styles.integrationCaption}>환경변수 키 입력 후 실주소 변환 사용</Text>
+            <Text style={styles.integrationTitle}>Google 지도</Text>
+            <Text style={styles.integrationCaption}>API 키 없이 방문 순서 길찾기 링크 사용</Text>
           </View>
           <View style={styles.readyBadge}>
-            <Text style={styles.readyText}>연결 준비</Text>
+            <Text style={styles.readyText}>사용 가능</Text>
           </View>
         </View>
         <View style={styles.integrationDivider} />
@@ -2000,6 +2109,41 @@ const styles = StyleSheet.create({
   },
   currentMarkerInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#2E6BFF', borderWidth: 2, borderColor: '#FFFFFF' },
   mapMarkerWrap: { position: 'absolute', alignItems: 'center' },
+  mapRouteLine: {
+    position: 'absolute',
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#2E6BFF',
+    shadowColor: '#163D9A',
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  mapRouteArrow: {
+    position: 'absolute',
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#2E6BFF',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 4,
+  },
+  mapSegmentBadge: {
+    position: 'absolute',
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#B8C9F4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 3,
+  },
+  mapSegmentBadgeText: { color: '#2E6BFF', fontSize: 8, fontWeight: '900' },
   mapMarker: {
     width: 32,
     height: 32,
@@ -2034,6 +2178,9 @@ const styles = StyleSheet.create({
     borderRadius: 5,
     paddingHorizontal: 7,
     paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   mapBrandText: { color: '#566274', fontSize: 8, fontWeight: '800', letterSpacing: 0.5 },
   myLocationButton: {
@@ -2085,6 +2232,18 @@ const styles = StyleSheet.create({
     height: 39,
   },
   optimizeButtonText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
+  googleMapsButton: {
+    minHeight: 58,
+    borderRadius: 16,
+    backgroundColor: '#1A73E8',
+    marginTop: 10,
+    paddingHorizontal: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  googleMapsButtonTitle: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  googleMapsButtonCaption: { color: '#D7E7FF', fontSize: 9, marginTop: 3 },
   routeLine: { position: 'relative' },
   routeItemWrap: { position: 'relative' },
   routeConnector: {
