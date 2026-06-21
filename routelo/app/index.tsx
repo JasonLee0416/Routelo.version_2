@@ -1243,7 +1243,7 @@ function OcrScannerModal({
               <Ionicons name="flask-outline" size={18} color={C.textMuted} />
               <Text style={styles.demoReceiptText}>샘플 인수증으로 OCR 파이프라인 테스트</Text>
             </Pressable>
-            {__DEV__ && Platform.OS === 'android' && (
+            {Platform.OS === 'android' && (
               <Pressable style={styles.demoReceiptButton} onPress={runOnnxProbe}>
                 <Ionicons name="hardware-chip-outline" size={18} color={C.textMuted} />
                 <Text style={styles.demoReceiptText}>Android ONNX Runtime 진단</Text>
