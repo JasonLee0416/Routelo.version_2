@@ -25,6 +25,7 @@ import { SAMPLE_DELIVERIES } from './data';
 import { Delivery, OcrFieldKey, OcrFieldResult, OcrPipelineResult } from './models';
 import { optimizeByNearestNeighbor } from './services/maps';
 import { inspectCaptureQuality, runHybridOcr } from './services/ocr';
+import { probePpOcrRuntime } from './services/recognizer';
 
 type TabKey = 'home' | 'deliveries' | 'route' | 'notifications' | 'settings';
 type DeliveryFilter = 'all' | 'pending' | 'completed';
@@ -1089,13 +1090,31 @@ function OcrScannerModal({
     setStage('quality');
   };
 
+  const runOnnxProbe = async () => {
+    const probe = await probePpOcrRuntime();
+    if (!probe.available || probe.error) {
+      Alert.alert('ONNX Runtime 진단', probe.error || 'Android 네이티브 런타임을 사용할 수 없습니다.');
+      return;
+    }
+    Alert.alert(
+      'ONNX Runtime 정상',
+      [
+        `버전: ${probe.model?.runtimeVersion || '-'}`,
+        `Smoke 출력: ${probe.smoke?.values.join(', ') || '-'}`,
+        `검출 모델: ${probe.detector?.inputs.map((input) => `${input.name} ${input.shape.join('×')}`).join(', ') || '-'}`,
+        `한국어 모델: ${probe.recognizer?.inputs.map((input) => `${input.name} ${input.shape.join('×')}`).join(', ') || '-'}`,
+        `처리시간: ${probe.smoke?.processingMs.toFixed(2) || '-'}ms`,
+      ].join('\n'),
+    );
+  };
+
   const analyze = async () => {
     if (result && !result.quality.passed) {
       Alert.alert('재촬영 권장', result.quality.messages[0] || '촬영 품질을 확인해주세요.');
       return;
     }
     setStage('processing');
-    const next = await runHybridOcr(assetInfo);
+    const next = await runHybridOcr({ ...assetInfo, uri: imageUri });
     setResult(next);
     setFields(next.fields);
     setStage('review');
@@ -1224,6 +1243,12 @@ function OcrScannerModal({
               <Ionicons name="flask-outline" size={18} color={C.textMuted} />
               <Text style={styles.demoReceiptText}>샘플 인수증으로 OCR 파이프라인 테스트</Text>
             </Pressable>
+            {__DEV__ && Platform.OS === 'android' && (
+              <Pressable style={styles.demoReceiptButton} onPress={runOnnxProbe}>
+                <Ionicons name="hardware-chip-outline" size={18} color={C.textMuted} />
+                <Text style={styles.demoReceiptText}>Android ONNX Runtime 진단</Text>
+              </Pressable>
+            )}
           </ScrollView>
         )}
 

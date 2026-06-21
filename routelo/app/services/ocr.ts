@@ -3,6 +3,7 @@ import { DEFAULT_FIELD_REGISTRY } from '../ocr/fieldRegistry';
 import { normalizeReceipt } from '../ocr/normalize';
 
 type ImageAssetInfo = {
+  uri?: string;
   width?: number;
   height?: number;
   fileSize?: number;

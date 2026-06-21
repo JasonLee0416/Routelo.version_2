@@ -1,0 +1,22 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.routelo.onnx'
+version = '0.1.0'
+
+android {
+  namespace "com.routelo.onnx"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.25.1'
+}

@@ -92,7 +92,7 @@ export type CaptureQuality = {
 };
 
 export type OcrPipelineResult = {
-  engine: 'mlkit-demo' | 'cloud-fallback-demo';
+  engine: 'mlkit-demo' | 'cloud-fallback-demo' | 'ppocrv5-spike';
   rawText: string;
   fields: OcrFieldResult[];
   documentConfidence: number;
