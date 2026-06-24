@@ -57,8 +57,7 @@ jobs:
 
       - name: Verify PP-OCR models are bundled
         run: |
-          test "$(find dist-android -name '*.onnx' | wc -l | tr -d ' ')" -ge 2
-          find dist-android -name '*.onnx' -print
+          node -e "const assets=require('./dist-android/metadata.json').fileMetadata.android.assets; const models=assets.filter(({ext})=>ext==='onnx'); if(models.length<2) process.exit(1); console.log(models)"
 
       - name: Generate Android project
         run: npx expo prebuild --platform android --clean --no-install

@@ -50,8 +50,7 @@ jobs:
 
       - name: Verify PP-OCR models are bundled
         run: |
-          test "$(find dist-ios -name '*.onnx' | wc -l | tr -d ' ')" -ge 2
-          find dist-ios -name '*.onnx' -print
+          node -e "const assets=require('./dist-ios/metadata.json').fileMetadata.ios.assets; const models=assets.filter(({ext})=>ext==='onnx'); if(models.length<2) process.exit(1); console.log(models)"
 
       - name: Generate iOS project
         run: npx expo prebuild --platform ios --clean --no-install
