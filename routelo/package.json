@@ -22,6 +22,7 @@
     "@types/react": "~19.2.2",
     "jest": "^29.7.0",
     "jest-expo": "~56.0.0",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -34,7 +35,8 @@
     "typecheck": "tsc --noEmit",
     "doctor": "npx --yes expo-doctor",
     "build:web": "expo export --platform web",
-    "validate": "npm run test:ci && npm run typecheck && npm run doctor && npm run build:web"
+    "validate": "npm run test:ci && npm run typecheck && npm run doctor && npm run build:web",
+    "postinstall": "patch-package"
   },
   "jest": {
     "preset": "jest-expo",
