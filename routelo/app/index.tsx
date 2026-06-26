@@ -51,6 +51,11 @@ import { DEFAULT_ROUTELO_SETTINGS, NavApp, RouteloSettings } from './settings';
 import { GYEONGGI_DISTRICTS, SEOUL_DISTRICTS } from './settings/districts';
 import { settingsRepository } from './settings/native';
 import {
+  vendorDirectoryFor,
+  VendorVerification,
+  verifyVendor,
+} from './vendor';
+import {
   inspectCaptureQuality,
   OcrNoTextDetectedError,
   OcrRecognizerUnavailableError,
@@ -2021,10 +2026,12 @@ function QualityMeter({
 
 function OcrScannerModal({
   visible,
+  settings,
   onClose,
   onRegister,
 }: {
   visible: boolean;
+  settings: RouteloSettings;
   onClose: () => void;
   onRegister: (delivery: Delivery) => void;
 }) {
@@ -2034,6 +2041,7 @@ function OcrScannerModal({
   const [assetInfo, setAssetInfo] = useState<{ width?: number; height?: number; fileSize?: number }>({});
   const [result, setResult] = useState<OcrPipelineResult>();
   const [fields, setFields] = useState<OcrFieldResult[]>([]);
+  const [vendorCheck, setVendorCheck] = useState<VendorVerification>();
 
   const reset = () => {
     setStage('capture');
@@ -2041,6 +2049,7 @@ function OcrScannerModal({
     setAssetInfo({});
     setResult(undefined);
     setFields([]);
+    setVendorCheck(undefined);
   };
 
   useEffect(() => {
@@ -2090,11 +2099,26 @@ function OcrScannerModal({
       return;
     }
     setStage('processing');
+    setVendorCheck(undefined);
     try {
       const next = await runReceiptOcr({ ...assetInfo, uri: imageUri });
       setResult(next);
       setFields(next.fields);
       setStage('review');
+      // 발주처 온라인 교차검증(옵트인). 업체명만 안전 검증해 provenance로 부착, 자동 입력 없음.
+      const vendorName =
+        next.fields.find((f) => f.key === 'orderingVendorName')?.value || '';
+      const vendorTel =
+        next.fields.find((f) => f.key === 'orderingVendorTel')?.value || '';
+      if (vendorName) {
+        verifyVendor(vendorDirectoryFor(settings), vendorName, {
+          ocrPhone: vendorTel,
+        })
+          .then((verification) =>
+            verification.status === 'skipped' ? undefined : setVendorCheck(verification),
+          )
+          .catch(() => undefined);
+      }
     } catch (error) {
       setResult(undefined);
       setFields([]);
@@ -2407,6 +2431,38 @@ function OcrScannerModal({
                       ))}
                     </View>
                   )}
+                  {field.key === 'orderingVendorName' && vendorCheck && (
+                    <View style={styles.vendorCheckRow}>
+                      <Ionicons
+                        name={
+                          vendorCheck.status === 'confirmed'
+                            ? 'checkmark-circle'
+                            : vendorCheck.status === 'ambiguous'
+                              ? 'help-circle'
+                              : 'close-circle'
+                        }
+                        size={15}
+                        color={
+                          vendorCheck.status === 'confirmed'
+                            ? C.success
+                            : vendorCheck.status === 'ambiguous'
+                              ? C.warning
+                              : C.textMuted
+                        }
+                      />
+                      <Text style={styles.vendorCheckText} numberOfLines={2}>
+                        {vendorCheck.status === 'confirmed'
+                          ? `온라인 확인됨: ${vendorCheck.best?.name ?? ''}${
+                              vendorCheck.best?.phone
+                                ? ` · ${vendorCheck.best.phone}`
+                                : ''
+                            }`
+                          : vendorCheck.status === 'ambiguous'
+                            ? `유사 업체 ${vendorCheck.candidates.length}곳 — 직접 확인 필요`
+                            : '온라인에서 일치하는 업체를 찾지 못했습니다'}
+                      </Text>
+                    </View>
+                  )}
                 </View>
               ))}
               <View style={styles.privacyNotice}>
@@ -2630,6 +2686,7 @@ export default function RouteloApp() {
       />
       <OcrScannerModal
         visible={scannerVisible}
+        settings={settings}
         onClose={() => setScannerVisible(false)}
         onRegister={(delivery) => {
           const fee = calculateFeeByAddress(delivery.deliveryAddress, settings);
@@ -3530,6 +3587,8 @@ const makeStyles = (C: Palette) =>
   candidateLabel: { color: C.textMuted, fontSize: 8, fontWeight: '700' },
   candidateChip: { paddingHorizontal: 8, paddingVertical: 5, borderRadius: 9, backgroundColor: C.surfaceAlt },
   candidateChipText: { color: C.primary, fontSize: 8, fontWeight: '700' },
+  vendorCheckRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 9 },
+  vendorCheckText: { flex: 1, color: C.textMuted, fontSize: 9, fontWeight: '700' },
   privacyNotice: {
     marginTop: 12,
     padding: 13,
