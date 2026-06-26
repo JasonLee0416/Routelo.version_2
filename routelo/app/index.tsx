@@ -23,7 +23,6 @@ import {
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
 
-import { SAMPLE_DELIVERIES, SAMPLE_FUEL_LOGS } from './data';
 import { AccountState, EnergyType } from './account';
 import { accountRepository } from './account/native';
 import {
@@ -52,7 +51,6 @@ import { DEFAULT_ROUTELO_SETTINGS, NavApp, RouteloSettings } from './settings';
 import { GYEONGGI_DISTRICTS, SEOUL_DISTRICTS } from './settings/districts';
 import { settingsRepository } from './settings/native';
 import {
-  DEMO_RECEIPT_TEXT,
   inspectCaptureQuality,
   OcrNoTextDetectedError,
   OcrRecognizerUnavailableError,
@@ -1959,7 +1957,6 @@ function OcrScannerModal({
   const [assetInfo, setAssetInfo] = useState<{ width?: number; height?: number; fileSize?: number }>({});
   const [result, setResult] = useState<OcrPipelineResult>();
   const [fields, setFields] = useState<OcrFieldResult[]>([]);
-  const [demoMode, setDemoMode] = useState(false);
 
   const reset = () => {
     setStage('capture');
@@ -1967,7 +1964,6 @@ function OcrScannerModal({
     setAssetInfo({});
     setResult(undefined);
     setFields([]);
-    setDemoMode(false);
   };
 
   useEffect(() => {
@@ -1998,25 +1994,6 @@ function OcrScannerModal({
     const info = { width: asset.width, height: asset.height, fileSize: asset.fileSize };
     setImageUri(asset.uri);
     setAssetInfo(info);
-    setDemoMode(false);
-    setResult({
-      engine: 'fixture',
-      rawText: '',
-      fields: [],
-      documentConfidence: 0,
-      quality: inspectCaptureQuality(info),
-      processingMs: 0,
-      variantsCompared: 0,
-      unmapped: [],
-    });
-    setStage('quality');
-  };
-
-  const useDemoReceipt = () => {
-    const info = { width: 1440, height: 1920, fileSize: 780000 };
-    setAssetInfo(info);
-    setImageUri(undefined);
-    setDemoMode(true);
     setResult({
       engine: 'fixture',
       rawText: '',
@@ -2037,10 +2014,7 @@ function OcrScannerModal({
     }
     setStage('processing');
     try {
-      const next = await runReceiptOcr(
-        { ...assetInfo, uri: imageUri },
-        demoMode ? DEMO_RECEIPT_TEXT : undefined,
-      );
+      const next = await runReceiptOcr({ ...assetInfo, uri: imageUri });
       setResult(next);
       setFields(next.fields);
       setStage('review');
@@ -2191,10 +2165,6 @@ function OcrScannerModal({
             <Pressable style={styles.scanSecondaryButton} onPress={() => selectImage(false)}>
               <Ionicons name="images-outline" size={20} color={C.primary} />
               <Text style={styles.scanSecondaryButtonText}>갤러리에서 선택</Text>
-            </Pressable>
-            <Pressable style={styles.demoReceiptButton} onPress={useDemoReceipt}>
-              <Ionicons name="flask-outline" size={18} color={C.textMuted} />
-              <Text style={styles.demoReceiptText}>샘플 인수증으로 OCR 파이프라인 테스트</Text>
             </Pressable>
           </ScrollView>
         )}
@@ -2386,9 +2356,7 @@ function OcrScannerModal({
 export default function RouteloApp() {
   const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState<TabKey>('home');
-  const [orders, setOrders] = useState<DeliveryOrder[]>(() =>
-    SAMPLE_DELIVERIES.map((delivery) => legacyDeliveryToOrder(delivery)),
-  );
+  const [orders, setOrders] = useState<DeliveryOrder[]>([]);
   const deliveries = useMemo(
     () => orders.map(orderToLegacyDelivery),
     [orders],
@@ -2400,7 +2368,7 @@ export default function RouteloApp() {
   const [settings, setSettings] = useState<RouteloSettings>(
     DEFAULT_ROUTELO_SETTINGS,
   );
-  const [fuelLogs] = useState<FuelLog[]>(SAMPLE_FUEL_LOGS);
+  const [fuelLogs] = useState<FuelLog[]>([]);
 
   useEffect(() => {
     deliveryRepository
@@ -3304,17 +3272,6 @@ const makeStyles = (C: Palette) =>
     marginTop: 9,
   },
   scanSecondaryButtonText: { color: C.primary, fontSize: 11, fontWeight: '800' },
-  demoReceiptButton: {
-    minHeight: 45,
-    marginTop: 9,
-    borderRadius: 15,
-    backgroundColor: C.surfaceAlt,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-  },
-  demoReceiptText: { color: C.textMuted, fontSize: 10, fontWeight: '700' },
   qualityPreview: {
     height: 285,
     borderRadius: 24,
