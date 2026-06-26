@@ -18,12 +18,6 @@ export const FIELD_REGISTRY_VERSION = 3;
 // 별칭은 services/ocr.ts 의 기존 키워드 + 인수증 표면형을 시드로 합친 것.
 export const DEFAULT_FIELD_REGISTRY: FieldDef[] = [
   {
-    key: 'orderNumber',
-    label: '주문번호',
-    type: 'text',
-    aliases: ['주문번호', '주문 번호', '주문서 No', '접수번호', '관리번호', '오더번호', '주문코드'],
-  },
-  {
     key: 'orderingVendorName',
     label: '발주화원',
     type: 'text',

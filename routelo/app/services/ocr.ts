@@ -54,7 +54,6 @@ export class OcrNoTextDetectedError extends Error {
 }
 
 const LABELS: Record<OcrFieldKey, string> = {
-  orderNumber: '주문번호',
   orderingVendorName: '발주화원',
   orderingVendorTel: '발주화원 전화번호',
   fulfillingVendorName: '배송화원',
@@ -336,16 +335,6 @@ export function parseReceiptText(
     DEFAULT_FIELD_REGISTRY,
   );
 
-  const orderNumberSource =
-    findLabeledValue(lines, ['주문번호', '주문 번호', '주문서 No', 'NO']) ||
-    firstMatchingLine(lines, (line) =>
-      /(?:주문|NO|No).*20\d{4}[-\w]+/i.test(line),
-    );
-  const orderNumber =
-    orderNumberSource?.value.match(/[A-Z0-9][A-Z0-9\-_]{5,}/i)?.[0] ||
-    mapped.orderNumber ||
-    '';
-
   const orderingVendor = findLabeledValue(lines, [
     '발주화원',
     '발주처',
@@ -459,17 +448,6 @@ export function parseReceiptText(
       : '';
 
   const fields: OcrFieldResult[] = [
-    field(
-      'orderNumber',
-      orderNumber,
-      orderNumber ? 90 : 0,
-      orderNumberSource?.sourceText || mapped.orderNumber || '',
-      [],
-      {
-        sourceLineIds: orderNumberSource?.sourceLineIds,
-        extractionMethod: orderNumber ? 'pattern' : undefined,
-      },
-    ),
     field(
       'orderingVendorName',
       orderingVendor?.value || '',
