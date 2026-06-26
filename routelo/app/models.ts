@@ -45,7 +45,6 @@ export type OcrForm = {
 };
 
 export type OcrFieldKey =
-  | 'orderNumber'
   | 'orderingVendorName'
   | 'orderingVendorTel'
   | 'fulfillingVendorName'

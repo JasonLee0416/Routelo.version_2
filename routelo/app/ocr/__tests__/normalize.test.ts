@@ -66,7 +66,6 @@ describe('normalizeReceipt', () => {
   const result = normalizeReceipt(
     [
       '배송 인수증',
-      '주문번호 FL-20260621-1842',
       '배송일자 2026.06.21',
       '업체명 더채플앳청담',
       '배송주소 서울 강남구 선릉로 757 더채플앳청담 3층',
@@ -82,7 +81,6 @@ describe('normalizeReceipt', () => {
 
   it('혼합 레이아웃에서 지원 필드를 정확히 추출한다', () => {
     expect(result.fields).toEqual({
-      orderNumber: 'FL-20260621-1842',
       productName: '축하 3단 화환 2개',
       deliveryDate: '2026.06.21',
       venueName: '더채플앳청담',

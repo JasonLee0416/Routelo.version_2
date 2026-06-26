@@ -1875,7 +1875,6 @@ function DeliveryDetailSheet({
 type ScanStage = 'capture' | 'quality' | 'processing' | 'review';
 
 const OCR_FIELD_ICONS: Record<OcrFieldKey, keyof typeof Ionicons.glyphMap> = {
-  orderNumber: 'barcode-outline',
   orderingVendorName: 'storefront-outline',
   orderingVendorTel: 'call-outline',
   fulfillingVendorName: 'business-outline',
