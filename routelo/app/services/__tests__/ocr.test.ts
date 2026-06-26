@@ -59,4 +59,31 @@ describe('OCR zero-fabrication guard', () => {
     expect(result.rawText).toContain('FL-20260621-1842');
     expect(result.recognizedLines?.[0].text).toContain('주문번호');
   });
+
+  it('uses PP-OCR geometry to associate labels with values', async () => {
+    const recognizer = jest.fn().mockResolvedValue({
+      fullText: '김민준\n받는 분\n010-4821-7732\n수령인 전화',
+      lines: [
+        { text: '김민준', boundingBox: { x: 180, y: 10, width: 80, height: 20 } },
+        { text: '받는 분', boundingBox: { x: 10, y: 12, width: 90, height: 20 } },
+        { text: '010-4821-7732', boundingBox: { x: 180, y: 50, width: 130, height: 20 } },
+        { text: '수령인 전화', boundingBox: { x: 10, y: 48, width: 100, height: 20 } },
+      ],
+      processingMs: 120,
+    });
+
+    const result = await runReceiptOcr(
+      { uri: 'file:///layout-receipt.jpg', width: 1200, height: 1600 },
+      undefined,
+      recognizer,
+    );
+
+    expect(result.rawText).toContain('받는 분 김민준');
+    expect(
+      result.fields.find(({ key }) => key === 'recipientName')?.value,
+    ).toBe('김민준');
+    expect(
+      result.fields.find(({ key }) => key === 'recipientTel')?.value,
+    ).toBe('010-4821-7732');
+  });
 });

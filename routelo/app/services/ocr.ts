@@ -5,6 +5,7 @@ import {
   OcrPipelineResult,
 } from '../models';
 import { DEFAULT_FIELD_REGISTRY } from '../ocr/fieldRegistry';
+import { buildLayoutText } from '../ocr/layout';
 import { normalizeReceipt } from '../ocr/normalize';
 
 type ImageAssetInfo = {
@@ -194,7 +195,9 @@ function escapeRegExp(value: string) {
 function findLabeledValue(lines: string[], aliases: string[]) {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    for (const alias of aliases) {
+    for (const alias of [...aliases].sort(
+      (left, right) => right.length - left.length,
+    )) {
       if (!compactLabel(line).startsWith(compactLabel(alias))) continue;
       const value = line
         .replace(
@@ -202,7 +205,13 @@ function findLabeledValue(lines: string[], aliases: string[]) {
           '',
         )
         .trim();
-      if (!value || compactLabel(value) === compactLabel(alias)) continue;
+      if (
+        !value ||
+        value === line.trim() ||
+        compactLabel(value) === compactLabel(alias)
+      ) {
+        continue;
+      }
       return {
         value,
         sourceText: line,
@@ -701,7 +710,11 @@ export async function runReceiptOcr(
       });
     const recognized = await recognize(asset.uri);
     if (!recognized.fullText.trim()) throw new OcrNoTextDetectedError();
-    const parsed = parseReceiptText(recognized.fullText, quality);
+    const layoutText = buildLayoutText(
+      recognized.lines || [],
+      recognized.fullText,
+    );
+    const parsed = parseReceiptText(layoutText, quality);
     return {
       ...parsed,
       engine: 'ppocrv5',
