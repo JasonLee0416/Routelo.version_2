@@ -1,0 +1,9 @@
+{
+  "name": "routelo-ocr-receipt-samples",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/validate-dataset.mjs"
+  }
+}
+
