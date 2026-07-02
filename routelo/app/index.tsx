@@ -63,7 +63,13 @@ import {
 } from './services/ocr';
 import {
   createInitialLiveOcrSession,
+  liveOcrChecklistItems,
+  liveOcrIncompleteMessage,
   liveOcrReviewQuery,
+  liveOcrScannerStepLabel,
+  LiveOcrScanStage,
+  summarizeLiveOcrSession,
+  liveOcrStageTitle,
   mergeOcrResult,
   updateLiveOcrSession,
 } from './services/liveOcr';
@@ -1965,7 +1971,7 @@ function DeliveryDetailSheet({
   );
 }
 
-type ScanStage = 'capture' | 'quality' | 'processing' | 'review';
+type ScanStage = LiveOcrScanStage;
 
 const OCR_FIELD_ICONS: Record<OcrFieldKey, keyof typeof Ionicons.glyphMap> = {
   orderingVendorName: 'storefront-outline',
@@ -2036,50 +2042,46 @@ function LiveScanChecklist({
   session: ReturnType<typeof createInitialLiveOcrSession>;
 }) {
   const { C, styles } = useTheme();
+  const summary = summarizeLiveOcrSession(session);
+  const checklist = liveOcrChecklistItems(session);
   return (
     <View style={styles.liveChecklist}>
       <View style={styles.liveChecklistHeader}>
         <Text style={styles.liveChecklistTitle}>필수 인식 항목</Text>
-        <Text style={styles.liveChecklistMeta}>
-          {Object.values(session.fields).filter((field) => field.status === 'locked').length}/3
-        </Text>
+        <Text style={styles.liveChecklistMeta}>{summary.lockedCount}/{summary.totalCount}</Text>
       </View>
-      {Object.values(session.fields).map((field) => {
-        const locked = field.status === 'locked';
-        const candidate = field.status === 'candidate';
+      {checklist.map((field) => {
         return (
           <View
             key={field.id}
             style={[
               styles.liveChecklistItem,
-              locked ? styles.liveChecklistItemLocked : undefined,
-              candidate ? styles.liveChecklistItemCandidate : undefined,
+              field.locked ? styles.liveChecklistItemLocked : undefined,
+              field.candidate ? styles.liveChecklistItemCandidate : undefined,
             ]}
           >
             <View
               style={[
                 styles.liveChecklistIcon,
                 {
-                  backgroundColor: locked
+                  backgroundColor: field.locked
                     ? C.successBg
-                    : candidate
+                    : field.candidate
                       ? C.warningBg
                       : C.surfaceAlt,
                 },
               ]}
             >
               <Ionicons
-                name={locked ? 'checkmark-circle' : 'close-circle-outline'}
+                name={field.locked ? 'checkmark-circle' : 'close-circle-outline'}
                 size={19}
-                color={locked ? C.success : candidate ? C.warning : C.textMuted}
+                color={field.locked ? C.success : field.candidate ? C.warning : C.textMuted}
               />
             </View>
             <View style={styles.flex}>
               <Text style={styles.liveChecklistLabel}>{field.label}</Text>
               <Text style={styles.liveChecklistValue} numberOfLines={1}>
-                {field.value
-                  ? `${field.value} · ${field.confidence}% · ${field.supportCount}프레임`
-                  : '아직 안정적으로 인식되지 않음'}
+                {field.detail}
               </Text>
             </View>
           </View>
@@ -2109,6 +2111,7 @@ function OcrScannerModal({
   const [fields, setFields] = useState<OcrFieldResult[]>([]);
   const [vendorCheck, setVendorCheck] = useState<VendorVerification>();
   const [liveSession, setLiveSession] = useState(createInitialLiveOcrSession);
+  const liveSummary = summarizeLiveOcrSession(liveSession);
 
   const reset = () => {
     setStage('capture');
@@ -2197,7 +2200,7 @@ function OcrScannerModal({
         setStage('capture');
         Alert.alert(
           '프레임 누적 완료',
-          '인식된 항목은 고정했습니다. 남은 X 항목을 채우려면 인수증을 더 가까이 맞추고 다음 프레임을 촬영해 주세요.',
+          liveOcrIncompleteMessage(nextSession),
         );
       }
     } catch (error) {
@@ -2291,24 +2294,12 @@ function OcrScannerModal({
           <View style={styles.scannerHeaderCopy}>
             <Text style={styles.scannerEyebrow}>SMART DOCUMENT OCR</Text>
             <Text style={styles.scannerTitle}>
-              {stage === 'capture'
-                ? '라이브 인수증 인식'
-                : stage === 'quality'
-                  ? '프레임 품질 검사'
-                  : stage === 'processing'
-                    ? '문서 분석 중'
-                    : '추출 결과 확인'}
+              {liveOcrStageTitle(stage)}
             </Text>
           </View>
           <View style={styles.scannerStep}>
             <Text style={styles.scannerStepText}>
-              {stage === 'capture'
-                ? `${Object.values(liveSession.fields).filter((field) => field.status === 'locked').length}/3`
-                : stage === 'quality'
-                  ? '품질'
-                  : stage === 'processing'
-                    ? 'OCR'
-                    : '검토'}
+              {liveOcrScannerStepLabel(stage, liveSession)}
             </Text>
           </View>
         </View>
@@ -2330,9 +2321,7 @@ function OcrScannerModal({
               <View style={styles.autoCaptureBadge}>
                 <View style={styles.autoCaptureDot} />
                 <Text style={styles.autoCaptureText}>
-                  {liveSession.acceptedFrameCount
-                    ? `${liveSession.acceptedFrameCount}개 프레임 누적`
-                    : '프레임 대기 중'}
+                  {liveSummary.frameSummary}
                 </Text>
               </View>
             </View>
@@ -2354,7 +2343,7 @@ function OcrScannerModal({
             <Pressable style={styles.scanPrimaryButton} onPress={() => selectImage(true)}>
               <Ionicons name="camera" size={21} color="#FFFFFF" />
               <Text style={styles.scanPrimaryButtonText}>
-                {liveSession.acceptedFrameCount ? '다음 프레임 촬영' : '첫 프레임 촬영'}
+                {liveSummary.primaryCaptureLabel}
               </Text>
             </Pressable>
             <Pressable style={styles.scanSecondaryButton} onPress={() => selectImage(false)}>

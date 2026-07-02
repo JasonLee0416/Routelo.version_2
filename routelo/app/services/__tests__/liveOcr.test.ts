@@ -1,7 +1,12 @@
 import {
   createInitialLiveOcrSession,
+  liveOcrChecklistItems,
+  liveOcrIncompleteMessage,
   liveOcrReviewQuery,
+  liveOcrScannerStepLabel,
+  liveOcrStageTitle,
   mergeOcrFields,
+  summarizeLiveOcrSession,
   updateLiveOcrSession,
 } from '../liveOcr';
 import { OcrFieldKey, OcrFieldResult, OcrPipelineResult } from '../../models';
@@ -105,6 +110,42 @@ describe('live OCR session accumulator', () => {
     ).toEqual({
       vendorName: '라움아트센터',
       vendorPhone: '02-123-4567',
+    });
+  });
+
+  it('builds stable scanner presentation copy from session state', () => {
+    const session = updateLiveOcrSession(
+      createInitialLiveOcrSession(),
+      result([
+        field('orderingVendorName', '꽃마루화원', 90),
+        field('deliveryAddress', '서울 강남구 테헤란로 1', 84),
+      ]),
+    );
+
+    expect(summarizeLiveOcrSession(session)).toEqual({
+      lockedCount: 0,
+      totalCount: 3,
+      remainingCount: 3,
+      frameSummary: '1개 프레임 누적',
+      primaryCaptureLabel: '다음 프레임 촬영',
+    });
+    expect(liveOcrScannerStepLabel('capture', session)).toBe('0/3');
+    expect(liveOcrStageTitle('quality')).toBe('프레임 품질 검사');
+    expect(liveOcrIncompleteMessage(session)).toContain('남은 3개 항목');
+  });
+
+  it('exposes checklist item status flags and user-facing details', () => {
+    const session = updateLiveOcrSession(
+      createInitialLiveOcrSession(),
+      result([field('recipientTel', '010-1234-5678', 88)]),
+    );
+
+    const phone = liveOcrChecklistItems(session).find((item) => item.id === 'phone');
+
+    expect(phone).toMatchObject({
+      candidate: true,
+      locked: false,
+      detail: '010-1234-5678 · 88% · 1프레임',
     });
   });
 });

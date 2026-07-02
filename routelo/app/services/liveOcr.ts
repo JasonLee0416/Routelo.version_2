@@ -19,6 +19,22 @@ export type LiveOcrSessionState = {
   readyForReview: boolean;
 };
 
+export type LiveOcrScanStage = 'capture' | 'quality' | 'processing' | 'review';
+
+export type LiveOcrChecklistItem = LiveOcrFieldState & {
+  locked: boolean;
+  candidate: boolean;
+  detail: string;
+};
+
+export type LiveOcrSessionSummary = {
+  lockedCount: number;
+  totalCount: number;
+  remainingCount: number;
+  frameSummary: string;
+  primaryCaptureLabel: string;
+};
+
 const LIVE_FIELD_DEFINITIONS: Array<{
   id: LiveOcrFieldId;
   label: string;
@@ -179,6 +195,71 @@ export function liveOcrReviewQuery(fields: OcrFieldResult[]): {
     valueOf(fields, 'fulfillingVendorTel') ||
     valueOf(fields, 'recipientTel');
   return { vendorName, vendorPhone: vendorPhone || undefined };
+}
+
+export function summarizeLiveOcrSession(
+  session: LiveOcrSessionState,
+): LiveOcrSessionSummary {
+  const fields = Object.values(session.fields);
+  const lockedCount = fields.filter((field) => field.status === 'locked').length;
+  const totalCount = fields.length;
+  const remainingCount = Math.max(totalCount - lockedCount, 0);
+
+  return {
+    lockedCount,
+    totalCount,
+    remainingCount,
+    frameSummary: session.acceptedFrameCount
+      ? `${session.acceptedFrameCount}개 프레임 누적`
+      : '프레임 대기 중',
+    primaryCaptureLabel: session.acceptedFrameCount
+      ? '다음 프레임 촬영'
+      : '첫 프레임 촬영',
+  };
+}
+
+export function liveOcrChecklistItems(
+  session: LiveOcrSessionState,
+): LiveOcrChecklistItem[] {
+  return Object.values(session.fields).map((field) => {
+    const locked = field.status === 'locked';
+    const candidate = field.status === 'candidate';
+    return {
+      ...field,
+      locked,
+      candidate,
+      detail: field.value
+        ? `${field.value} · ${field.confidence}% · ${field.supportCount}프레임`
+        : '아직 안정적으로 인식되지 않음',
+    };
+  });
+}
+
+export function liveOcrStageTitle(stage: LiveOcrScanStage): string {
+  if (stage === 'capture') return '라이브 인수증 인식';
+  if (stage === 'quality') return '프레임 품질 검사';
+  if (stage === 'processing') return '문서 분석 중';
+  return '추출 결과 확인';
+}
+
+export function liveOcrScannerStepLabel(
+  stage: LiveOcrScanStage,
+  session: LiveOcrSessionState,
+): string {
+  if (stage === 'capture') {
+    const summary = summarizeLiveOcrSession(session);
+    return `${summary.lockedCount}/${summary.totalCount}`;
+  }
+  if (stage === 'quality') return '품질';
+  if (stage === 'processing') return 'OCR';
+  return '검토';
+}
+
+export function liveOcrIncompleteMessage(session: LiveOcrSessionState): string {
+  const summary = summarizeLiveOcrSession(session);
+  return summary.remainingCount
+    ? `인식된 항목은 고정했습니다. 남은 ${summary.remainingCount}개 항목을 채우려면 인수증을 더 가까이 맞추고 다음 프레임을 촬영해 주세요.`
+    : '필수 인식 항목이 모두 고정되었습니다. 추출 결과를 검토해 주세요.';
 }
 
 const valueOf = (fields: OcrFieldResult[], key: OcrFieldKey) =>
