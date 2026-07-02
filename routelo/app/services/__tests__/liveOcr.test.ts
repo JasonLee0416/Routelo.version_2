@@ -91,6 +91,26 @@ describe('live OCR session accumulator', () => {
     expect(session.readyForReview).toBe(false);
   });
 
+  it('rejects frames that do not add stable live OCR evidence', () => {
+    const session = updateLiveOcrSession(
+      createInitialLiveOcrSession(),
+      result([
+        field('productName', '축하화환', 95),
+        field('recipientTel', '2026-07-01', 95),
+      ]),
+    );
+
+    expect(session.lastFrameAccepted).toBe(false);
+    expect(session.acceptedFrameCount).toBe(0);
+    expect(session.rejectedFrameCount).toBe(1);
+    expect(summarizeLiveOcrSession(session).frameSummary).toBe(
+      '1개 프레임 재촬영 필요',
+    );
+    expect(liveOcrIncompleteMessage(session)).toContain(
+      '후보를 안정적으로 찾지 못했습니다',
+    );
+  });
+
   it('keeps stronger OCR field candidates when merging frame results', () => {
     const merged = mergeOcrFields(
       [field('deliveryAddress', '서울 강남구', 72)],

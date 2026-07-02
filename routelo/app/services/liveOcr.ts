@@ -16,6 +16,8 @@ export type LiveOcrSessionState = {
   fields: Record<LiveOcrFieldId, LiveOcrFieldState>;
   frameCount: number;
   acceptedFrameCount: number;
+  rejectedFrameCount: number;
+  lastFrameAccepted: boolean;
   readyForReview: boolean;
 };
 
@@ -89,6 +91,8 @@ export const createInitialLiveOcrSession = (): LiveOcrSessionState => {
     fields,
     frameCount: 0,
     acceptedFrameCount: 0,
+    rejectedFrameCount: 0,
+    lastFrameAccepted: false,
     readyForReview: false,
   };
 };
@@ -147,6 +151,7 @@ export function updateLiveOcrSession(
   result: OcrPipelineResult,
 ): LiveOcrSessionState {
   const nextFields = { ...session.fields };
+  let frameAccepted = false;
 
   for (const definition of LIVE_FIELD_DEFINITIONS) {
     const current = nextFields[definition.id];
@@ -170,6 +175,7 @@ export function updateLiveOcrSession(
       confidence,
       supportCount,
     };
+    frameAccepted = true;
   }
 
   const readyForReview = Object.values(nextFields).every(
@@ -179,7 +185,9 @@ export function updateLiveOcrSession(
   return {
     fields: nextFields,
     frameCount: session.frameCount + 1,
-    acceptedFrameCount: session.acceptedFrameCount + 1,
+    acceptedFrameCount: session.acceptedFrameCount + (frameAccepted ? 1 : 0),
+    rejectedFrameCount: session.rejectedFrameCount + (frameAccepted ? 0 : 1),
+    lastFrameAccepted: frameAccepted,
     readyForReview,
   };
 }
@@ -211,7 +219,9 @@ export function summarizeLiveOcrSession(
     remainingCount,
     frameSummary: session.acceptedFrameCount
       ? `${session.acceptedFrameCount}개 프레임 누적`
-      : '프레임 대기 중',
+      : session.rejectedFrameCount
+        ? `${session.rejectedFrameCount}개 프레임 재촬영 필요`
+        : '프레임 대기 중',
     primaryCaptureLabel: session.acceptedFrameCount
       ? '다음 프레임 촬영'
       : '첫 프레임 촬영',
@@ -257,6 +267,9 @@ export function liveOcrScannerStepLabel(
 
 export function liveOcrIncompleteMessage(session: LiveOcrSessionState): string {
   const summary = summarizeLiveOcrSession(session);
+  if (!session.lastFrameAccepted) {
+    return '이번 프레임에서는 상호명·주소·전화번호 후보를 안정적으로 찾지 못했습니다. 인수증 전체가 밝고 흔들리지 않게 보이도록 다시 촬영해 주세요.';
+  }
   return summary.remainingCount
     ? `인식된 항목은 고정했습니다. 남은 ${summary.remainingCount}개 항목을 채우려면 인수증을 더 가까이 맞추고 다음 프레임을 촬영해 주세요.`
     : '필수 인식 항목이 모두 고정되었습니다. 추출 결과를 검토해 주세요.';
